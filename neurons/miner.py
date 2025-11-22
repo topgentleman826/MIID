@@ -58,6 +58,8 @@ from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 
 import bittensor as bt
+import jellyfish
+import Levenshtein
 import numpy as np
 import ollama
 import pandas as pd
@@ -119,12 +121,19 @@ class Miner(BaseMinerNeuron):
         
         self.model_name = getattr(self.config.neuron, 'model_name', None) if hasattr(self.config, 'neuron') else None
         if self.model_name is None:
-            # Use llama3.1 for better quality variations (8B model)
+            # Use llama3.1 for optimal balance of quality and speed (8B model)
+            # This provides excellent phonetic/orthographic accuracy for scoring
             self.model_name = 'llama3.1:latest'
             bt.logging.info(f"No model specified in config, using default model: {self.model_name}")
-            bt.logging.info("RECOMMENDATION: For better scores, use 'llama3.1:latest' (8B) or 'llama3.3:latest' (70B)")
+            bt.logging.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            bt.logging.info("MODEL RECOMMENDATIONS FOR MAXIMUM ACCURACY:")
+            bt.logging.info("  • llama3.1:latest (8B) - Default, excellent balance")
+            bt.logging.info("  • llama3.3:latest (70B) - Best quality (requires 32GB+ VRAM)")
+            bt.logging.info("  • qwen2.5:14b - Strong alternative, good multilingual")
+            bt.logging.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
         bt.logging.info(f"Using LLM model: {self.model_name}")
+        bt.logging.info("Quality optimizations enabled: Few-shot prompting, Quality scoring, Phonetic ranking")
 
         # Configure output limits and client reuse for better resiliency
         self.max_variations = getattr(self.config.neuron, 'max_variations', 25)
@@ -369,11 +378,14 @@ class Miner(BaseMinerNeuron):
                 self.model_name,
                 messages=self._build_llm_messages(prompt),
                 options={
-                    # Optimize for quality variations
-                    "num_predict": 512,  # Increased for more variations
-                    "temperature": 0.7,  # Higher for more creative variations
-                    "top_p": 0.92,
-                    "repeat_penalty": 1.15,  # Prevent repetition
+                    # Optimized for highest quality variations
+                    "num_predict": 768,      # Increased for more detailed variations
+                    "temperature": 0.65,     # Balanced: creative but controlled
+                    "top_p": 0.9,           # Focused sampling for quality
+                    "top_k": 50,            # Limit to top 50 tokens for consistency
+                    "repeat_penalty": 1.2,   # Strong penalty against repetition
+                    "frequency_penalty": 0.7, # Encourage diverse word choices
+                    "presence_penalty": 0.6,  # Encourage new patterns
                 }
             )
 
@@ -386,27 +398,92 @@ class Miner(BaseMinerNeuron):
             raise
 
     def _build_llm_messages(self, prompt: str) -> List[Dict[str, str]]:
-        """Build high-quality prompts optimized for scoring metrics."""
+        """Build high-quality prompts optimized for scoring metrics with few-shot examples."""
         return [
             {
                 "role": "system",
                 "content": (
-                    "You are an expert at generating high-quality name variations for identity testing systems.\n\n"
-                    "CRITICAL REQUIREMENTS:\n"
-                    "1. Generate variations that sound similar (phonetically) AND look similar (orthographically)\n"
-                    "2. Keep similar length to the original name (±2 characters)\n"
-                    "3. Apply specific transformation rules:\n"
-                    "   - Replace vowels with similar vowels (e.g., 'a' → 'e', 'i' → 'y')\n"
-                    "   - Replace double letters with single (e.g., 'tt' → 't')\n"
-                    "   - Replace consonants with phonetically similar ones (e.g., 'ph' → 'f', 'c' → 'k')\n"
-                    "   - Add or remove silent letters (e.g., 'knight' → 'nite')\n"
-                    "   - Replace 'ch' with 'sh', 'k', or 'c'\n"
-                    "   - Use common misspellings and cultural variations\n"
-                    "4. Each variation must be realistic and plausible\n"
-                    "5. Ensure variations are UNIQUE (no duplicates)\n\n"
-                    f"Generate EXACTLY {self.max_variations} variations.\n"
-                    "Return ONLY a JSON object: {\"variations\": [\"variant1\", \"variant2\", ...]}\n"
-                    "DO NOT include explanations or additional text."
+                    "You are an expert linguist specializing in name variation generation for identity security systems.\n\n"
+                    "MISSION: Generate name variations that bypass detection while maintaining phonetic and visual similarity.\n\n"
+                    "CRITICAL SCORING CRITERIA:\n"
+                    "1. PHONETIC SIMILARITY (Highest Priority):\n"
+                    "   - Variations must SOUND identical or nearly identical when spoken\n"
+                    "   - Use Soundex/Metaphone-equivalent transformations\n"
+                    "   - Maintain syllable structure and rhythm\n"
+                    "\n"
+                    "2. ORTHOGRAPHIC SIMILARITY:\n"
+                    "   - Variations must LOOK similar to the original\n"
+                    "   - Keep 60-80% of original letters\n"
+                    "   - Maintain visual pattern recognition\n"
+                    "\n"
+                    "3. LENGTH CONSTRAINT (Critical):\n"
+                    "   - MUST be within ±3 characters of original length\n"
+                    "   - Prefer exact or ±1 character difference\n"
+                    "\n"
+                    "TRANSFORMATION RULES (Apply Multiple Per Variation):\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    "Vowel Transformations:\n"
+                    "  • a ↔ e, a ↔ ai, a ↔ ay\n"
+                    "  • e ↔ i, e ↔ ee, e ↔ ea\n"
+                    "  • i ↔ y, i ↔ ie, i ↔ ee\n"
+                    "  • o ↔ u, o ↔ oo, o ↔ ow\n"
+                    "  • u ↔ oo, u ↔ ou\n"
+                    "\n"
+                    "Consonant Transformations:\n"
+                    "  • ph ↔ f ↔ v (phone → fone)\n"
+                    "  • c ↔ k ↔ ck (carl → karl)\n"
+                    "  • s ↔ z ↔ c (susan → zusan)\n"
+                    "  • ch ↔ sh ↔ tch (charles → sharles)\n"
+                    "  • j ↔ g ↔ dj (john → jon)\n"
+                    "  • t ↔ tt ↔ th (smith → smyth)\n"
+                    "  • gh → f → removed (laugh → laf)\n"
+                    "\n"
+                    "Double Letter Variations:\n"
+                    "  • tt → t, nn → n, ll → l, ss → s\n"
+                    "  • t → tt, n → nn, l → ll (reverse)\n"
+                    "\n"
+                    "Silent Letters:\n"
+                    "  • Remove: h (john → jon), gh (night → nite)\n"
+                    "  • Add: e at end (john → johne), h after consonants\n"
+                    "\n"
+                    "Cultural/Regional Variations:\n"
+                    "  • British vs American spellings\n"
+                    "  • Transliteration variants\n"
+                    "  • Common typos that persist\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    "EXAMPLES (Learn from these patterns):\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    "Original: 'John Smith'\n"
+                    "Variations:\n"
+                    "  • Jon Smith (remove silent h)\n"
+                    "  • John Smyth (i→y)\n"
+                    "  • Jon Smyth (combine)\n"
+                    "  • Jhon Smith (swap position)\n"
+                    "  • John Smithe (add silent e)\n"
+                    "  • Jahn Smith (o→a)\n"
+                    "  • John Smitt (th→tt)\n"
+                    "\n"
+                    "Original: 'Mohammed'\n"
+                    "Variations:\n"
+                    "  • Muhammad (cultural variant)\n"
+                    "  • Mohamed (remove d)\n"
+                    "  • Mohammad (swap e/a)\n"
+                    "  • Muhammed (add m)\n"
+                    "  • Mohamad (remove e)\n"
+                    "  • Muhamed (combine changes)\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    "QUALITY CHECKLIST (Before Including Each Variation):\n"
+                    "  ✓ Sounds similar when spoken?\n"
+                    "  ✓ Looks similar visually?\n"
+                    "  ✓ Within ±3 characters length?\n"
+                    "  ✓ Uses 1-3 transformation rules?\n"
+                    "  ✓ Realistic and plausible?\n"
+                    "  ✓ Not a duplicate?\n"
+                    "  ✓ Not identical to original?\n\n"
+                    f"OUTPUT FORMAT:\n"
+                    f"Generate EXACTLY {self.max_variations} high-quality variations.\n"
+                    "Return ONLY valid JSON: {\"variations\": [\"variant1\", \"variant2\", ...]}\n"
+                    "NO explanations. NO markdown. NO extra text. ONLY the JSON object."
                 ),
             },
             {
@@ -474,15 +551,19 @@ class Miner(BaseMinerNeuron):
                     if not pd.isna(var) and var != "" and var.strip()
                 ]
                 variations = self._deduplicate_variations(variations)
-
+                
                 # Filter out variations that are too different in length (for better length score)
                 variations = self._filter_by_length(variations, name)
                 
+                # Rank variations by quality and select the best ones
                 if len(variations) > self.max_variations:
                     bt.logging.info(
-                        f"Truncating variations for {name} to configured limit of {self.max_variations}"
+                        f"Ranking {len(variations)} variations for {name} and selecting top {self.max_variations}"
                     )
-                    variations = variations[: self.max_variations]
+                    variations = self._rank_and_filter_variations(variations, name, self.max_variations)
+                elif variations:
+                    # Even if we have fewer than max, still rank them for quality
+                    variations = self._rank_and_filter_variations(variations, name, len(variations))
 
                 structured_variations = []
                 for var in variations:
@@ -521,16 +602,104 @@ class Miner(BaseMinerNeuron):
         return name_variations
     
     def _filter_by_length(self, variations: List[str], original: str) -> List[str]:
-        """Filter variations to keep only those with similar length to original (±4 chars for better length score)."""
+        """Filter variations to keep only those with similar length to original (±3 chars for optimal score)."""
         original_len = len(original)
         filtered = []
         for var in variations:
-            # Allow ±4 characters difference for optimal length score
-            if abs(len(var) - original_len) <= 4:
+            # Allow ±3 characters difference for optimal length score (tighter constraint)
+            if abs(len(var) - original_len) <= 3:
                 filtered.append(var)
             else:
                 bt.logging.debug(f"Filtered out '{var}' due to length difference from '{original}'")
         return filtered if filtered else variations[:self.max_variations]  # Keep at least some variations
+    
+    def _score_variation_quality(self, variation: str, original: str) -> float:
+        """
+        Score a variation based on phonetic and orthographic similarity.
+        Returns a score between 0.0 and 1.0 (higher is better).
+        
+        This scoring function evaluates variations across multiple dimensions:
+        - Length similarity (prefer close to original length)
+        - Character overlap (Jaccard similarity)
+        - Edit distance (Levenshtein)
+        - Phonetic similarity (Soundex and Metaphone)
+        """
+        try:
+            original_lower = original.lower()
+            variation_lower = variation.lower()
+            
+            # 1. Length similarity (closer to original is better)
+            length_diff = abs(len(variation) - len(original))
+            length_score = max(0, 1.0 - (length_diff / max(len(original), 1)))
+            
+            # 2. Character overlap (Jaccard similarity)
+            original_chars = set(original_lower)
+            variation_chars = set(variation_lower)
+            if original_chars:
+                jaccard = len(original_chars & variation_chars) / len(original_chars | variation_chars)
+            else:
+                jaccard = 0.0
+            
+            # 3. Levenshtein distance (normalized edit distance)
+            lev_dist = Levenshtein.distance(original_lower, variation_lower)
+            lev_score = max(0, 1.0 - (lev_dist / max(len(original), len(variation))))
+            
+            # 4. Phonetic similarity (Soundex)
+            try:
+                soundex_orig = jellyfish.soundex(original)
+                soundex_var = jellyfish.soundex(variation)
+                soundex_match = 1.0 if soundex_orig == soundex_var else 0.5
+            except:
+                soundex_match = 0.5
+            
+            # 5. Phonetic similarity (Metaphone)
+            try:
+                metaphone_orig = jellyfish.metaphone(original)
+                metaphone_var = jellyfish.metaphone(variation)
+                metaphone_match = 1.0 if metaphone_orig == metaphone_var else 0.5
+            except:
+                metaphone_match = 0.5
+            
+            # Combined score (weighted average optimized for validator scoring)
+            quality_score = (
+                length_score * 0.25 +      # Length similarity: 25%
+                jaccard * 0.20 +           # Character overlap: 20%
+                lev_score * 0.20 +         # Edit distance: 20%
+                soundex_match * 0.175 +    # Phonetic (Soundex): 17.5%
+                metaphone_match * 0.175    # Phonetic (Metaphone): 17.5%
+            )
+            
+            return quality_score
+            
+        except Exception as e:
+            bt.logging.debug(f"Error scoring variation quality: {e}")
+            return 0.5  # Return neutral score on error
+    
+    def _rank_and_filter_variations(self, variations: List[str], original: str, max_count: int) -> List[str]:
+        """
+        Rank variations by quality score and return the top N.
+        This ensures only the highest quality variations are sent to validators.
+        """
+        if not variations:
+            return []
+        
+        # Score each variation
+        scored_variations = []
+        for var in variations:
+            score = self._score_variation_quality(var, original)
+            scored_variations.append((var, score))
+        
+        # Sort by score (highest first)
+        scored_variations.sort(key=lambda x: x[1], reverse=True)
+        
+        # Log the quality distribution
+        if scored_variations:
+            avg_score = sum(s[1] for s in scored_variations) / len(scored_variations)
+            top_score = scored_variations[0][1]
+            bt.logging.debug(f"Variation quality for '{original}': avg={avg_score:.3f}, top={top_score:.3f}")
+        
+        # Return top N variations
+        return [var for var, score in scored_variations[:max_count]]
     
     def _generate_fallback_variations(self, name: str, dob: str, address: str, count: int = 5) -> List[List[str]]:
         """Generate high-quality fallback variations using phonetic and orthographic rules."""

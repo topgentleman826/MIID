@@ -47,14 +47,15 @@ Each mining run is saved with a unique timestamp identifier to distinguish betwe
 different runs and facilitate analysis of results over time.
 """
 
+import os
 import time
 import typing
+from typing import Any, Dict, List, Optional, Tuple
+
 import bittensor as bt
+import numpy as np
 import ollama
 import pandas as pd
-import os
-import numpy as np
-from typing import List, Dict, Tuple, Any, Optional
 from tqdm import tqdm
 
 # Bittensor Miner Template:
@@ -111,35 +112,20 @@ class Miner(BaseMinerNeuron):
         """
         super(Miner, self).__init__(config=config)
         
-        # Initialize the LLM client
-        # You can override this in your config by setting model_name
-        # Ensure we have a valid model name, defaulting to llama3.2:1b if not specified
         self.model_name = getattr(self.config.neuron, 'model_name', None) if hasattr(self.config, 'neuron') else None
         if self.model_name is None:
-            #self.model_name = 'llama3.2:1b'
             self.model_name = 'tinyllama:latest'
             bt.logging.info(f"No model specified in config, using default model: {self.model_name}")
-        
+
         bt.logging.info(f"Using LLM model: {self.model_name}")
-        
-        # Check if Ollama is available
-        try:
-            # Check if model exists locally first
-            models = ollama.list().get('models', [])
-            model_exists = any(model.get('name') == self.model_name for model in models)
-            
-            if model_exists:
-                bt.logging.info(f"Model {self.model_name} already pulled")
-            else:
-                # Model not found locally, pull it
-                bt.logging.info(f"Pulling model {self.model_name}...")
-                ollama.pull(self.model_name)
-        except Exception as e:
-            bt.logging.error(f"Error with Ollama: {str(e)}")
-            bt.logging.error("Make sure Ollama is installed and running on this machine")
-            bt.logging.error("Install Ollama: curl -fsSL https://ollama.com/install.sh | sh")
-            bt.logging.error("Start Ollama: ollama serve")
-            raise RuntimeError("Ollama is required for this miner. Please install and start Ollama.")
+
+        # Configure output limits and client reuse for better resiliency
+        self.max_variations = getattr(self.config.neuron, 'max_variations', 25)
+        self.ollama_host = getattr(self.config.neuron, 'ollama_url', 'http://127.0.0.1:11434')
+        self.ollama_client = self._initialize_ollama_client()
+        bt.logging.info(
+            f"Configured to return up to {self.max_variations} variations per identity using Ollama host {self.ollama_host}"
+        )
         
         # Create a directory for storing mining results
         # This helps with debugging and analysis
@@ -147,6 +133,34 @@ class Miner(BaseMinerNeuron):
         os.makedirs(self.output_path, exist_ok=True)
         bt.logging.info(f"Mining results will be saved to: {self.output_path}")
         self.axon.verify_fns[IdentitySynapse.__name__] = self._verify_validator_request
+
+    def _initialize_ollama_client(self) -> ollama.Client:
+        """Create and validate the Ollama client instance.
+
+        Returns:
+            ollama.Client: Configured client pointing at the configured host.
+
+        Raises:
+            RuntimeError: If Ollama is unavailable or the model cannot be pulled.
+        """
+        try:
+            client = ollama.Client(host=self.ollama_host)
+            models = client.list().get('models', [])
+            model_exists = any(model.get('name') == self.model_name for model in models)
+
+            if model_exists:
+                bt.logging.info(f"Model {self.model_name} already pulled")
+            else:
+                bt.logging.info(f"Pulling model {self.model_name}...")
+                client.pull(self.model_name)
+
+            return client
+        except Exception as e:
+            bt.logging.error(f"Error with Ollama: {str(e)}")
+            bt.logging.error("Make sure Ollama is installed and running on this machine")
+            bt.logging.error("Install Ollama: curl -fsSL https://ollama.com/install.sh | sh")
+            bt.logging.error("Start Ollama: ollama serve")
+            raise RuntimeError("Ollama is required for this miner. Please install and start Ollama.")
 
     async def _verify_validator_request(self, synapse: IdentitySynapse) -> None:
         """
@@ -342,10 +356,9 @@ Remember: Only provide the name variations in a clean, comma-separated format.
 
         # Use Ollama to query the LLM
         try:
-            # Create Ollama client with configured URL
-            client = ollama.Client(host=getattr(self.config.neuron, 'ollama_url', 'http://127.0.0.1:11434'))
-            response = client.chat(
-                self.model_name, 
+            # Reuse the initialized client to avoid per-call setup overhead
+            response = self.ollama_client.chat(
+                self.model_name,
                 messages=[{
                     'role': 'user',
                     'content': context_prompt,
@@ -365,75 +378,67 @@ Remember: Only provide the name variations in a clean, comma-separated format.
     def process_variations(self, Response_list: List[str], run_id: int, run_dir: str, identity_list: List[List[str]]) -> Dict[str, List[List[str]]]:
         """
         Process LLM responses to extract identity variations.
-        
+
         This function takes the raw LLM responses and extracts the name variations
         using the Process_function. It then creates structured variations that include
         name, DOB, and address variations for each identity.
-        
+
         Args:
             Response_list: List of LLM responses in the format:
                           ["Respond", "---", "Query-{name}", "---", "{LLM response}"]
             run_id: Unique identifier for this processing run
             run_dir: Directory to save run-specific files
             identity_list: List of identity arrays, each containing [name, dob, address]
-            
+
         Returns:
             Dictionary mapping each name to its list of [name, dob, address] variations
         """
         bt.logging.info(f"Processing {len(Response_list)} responses")
-        # Split the responses by "Respond" to get individual responses
         Responds = "".join(Response_list).split("Respond")
-        
-        # Create a dictionary to store each name and its structured variations
-        name_variations = {}
-        
-        # Process each response to extract variations
+        name_variations: Dict[str, List[List[str]]] = {}
+
         for i in range(1, len(Responds)):
             try:
-                # Process the response to extract the name and variations
-                # Returns: (seed_name, processing_method, variations_list)
                 llm_respond = self.Process_function(Responds[i], False)
-                
-                # Extract the seed name and variations
                 name = llm_respond[0]
-                
-                # Find the corresponding identity in the identity list
+
                 matching_identity = None
                 for identity in identity_list:
                     if len(identity) > 0 and identity[0] == name:
                         matching_identity = identity
                         break
-                
+
                 if matching_identity is None:
                     bt.logging.warning(f"Could not find identity for name {name}")
                     continue
-                
-                # Get corresponding address and DOB
+
                 seed_address = matching_identity[2] if len(matching_identity) > 2 else "Unknown"
                 seed_dob = matching_identity[1] if len(matching_identity) > 1 else "Unknown"
-                
-                # Filter out empty or NaN variations
-                variations = [var for var in llm_respond[2] if not pd.isna(var) and var != ""]
-                
-                # Clean each variation and create structured entries
+
+                variations = [
+                    var for var in llm_respond[2]
+                    if not pd.isna(var) and var != ""
+                ]
+                variations = self._deduplicate_variations(variations)
+                if len(variations) > self.max_variations:
+                    bt.logging.info(
+                        f"Truncating variations for {name} to configured limit of {self.max_variations}"
+                    )
+                    variations = variations[: self.max_variations]
+
                 structured_variations = []
                 for var in variations:
-                    # Remove unwanted characters
                     cleaned_var = var.replace(")", "").replace("(", "").replace("]", "").replace("[", "").replace(",", "")
-                    # Remove leading/trailing whitespace
                     cleaned_var = cleaned_var.strip()
-                    # Only add non-empty variations
                     if cleaned_var:
-                        # Create structured variation entry: [name_variation, dob_variation, address_variation]
                         structured_variation = [cleaned_var, seed_dob, seed_address]
                         structured_variations.append(structured_variation)
-                
-                # Store the structured variations for this name
+
                 name_variations[name] = structured_variations
                 bt.logging.info(f"Processed {len(structured_variations)} variations for {name}")
             except Exception as e:
                 bt.logging.error(f"Error processing response {i}: {e}")
-        
+
         bt.logging.info(f"Generated structured variations: {name_variations}")
         return name_variations
     
@@ -486,7 +491,7 @@ Remember: Only provide the name variations in a clean, comma-separated format.
             # Extract non-empty variations
             variations = [var for var in row[1:] if var != ""]
             json_data[name] = variations
-        
+
         # Save to JSON file
         # Include run_id in the filename
         # json_path = os.path.join(run_dir, f"variations_{run_id}.json")
@@ -495,6 +500,21 @@ Remember: Only provide the name variations in a clean, comma-separated format.
         #     json.dump(json_data, f, indent=4)
         # bt.logging.info(f"Saved variations to: {json_path}")
         # bt.logging.info(f"DataFrame shape: {result_df.shape} with {max_variations} variation columns")
+
+    def _deduplicate_variations(self, variations: List[str]) -> List[str]:
+        """Return a list of unique variations while preserving order."""
+        seen = set()
+        deduped = []
+
+        for variation in variations:
+            normalized = variation.lower()
+            if normalized in seen:
+                continue
+
+            seen.add(normalized)
+            deduped.append(variation)
+
+        return deduped
     
     def Clean_extra(self, payload: str, comma: bool, line: bool, space: bool, preserve_name_spaces: bool = False) -> str:
         """
@@ -546,6 +566,9 @@ Remember: Only provide the name variations in a clean, comma-separated format.
         name = name.strip()
         if not name or name.isspace():
             return np.nan
+
+        # Normalize whitespace within the name
+        name = " ".join(name.split())
         
         # Handle cases with colons (e.g., "Here are variations: Name")
         if ":" in name:
@@ -601,7 +624,9 @@ Remember: Only provide the name variations in a clean, comma-separated format.
         """
         # Split the response by "---" to extract the query and response parts
         splits = string.split('---')
-        
+        if len(splits) < 3 or "-" not in splits[1]:
+            raise ValueError("Unexpected response format from LLM")
+
         # Extract and analyze the seed name structure
         seed = splits[1].split("-")[1].replace(".", "").replace(",", "").replace("'", "")
         seed_parts = seed.split()

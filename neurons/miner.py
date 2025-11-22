@@ -47,9 +47,11 @@ Each mining run is saved with a unique timestamp identifier to distinguish betwe
 different runs and facilitate analysis of results over time.
 """
 
+import json
 import os
 import time
 import typing
+from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 
 import bittensor as bt
@@ -122,6 +124,8 @@ class Miner(BaseMinerNeuron):
         # Configure output limits and client reuse for better resiliency
         self.max_variations = getattr(self.config.neuron, 'max_variations', 25)
         self.ollama_host = getattr(self.config.neuron, 'ollama_url', 'http://127.0.0.1:11434')
+        self.cache_max_entries = getattr(self.config.neuron, 'response_cache_size', 128)
+        self._response_cache: OrderedDict[str, str] = OrderedDict()
         self.ollama_client = self._initialize_ollama_client()
         bt.logging.info(
             f"Configured to return up to {self.max_variations} variations per identity using Ollama host {self.ollama_host}"
@@ -354,26 +358,66 @@ TASK: Based on this ethical context, please respond to the following query:
 Remember: Only provide the name variations in a clean, comma-separated format.
 """
 
+        cached = self._get_cached_response(prompt)
+        if cached is not None:
+            bt.logging.trace("Reusing cached LLM response for prompt")
+            return cached
+
         # Use Ollama to query the LLM
         try:
             # Reuse the initialized client to avoid per-call setup overhead
             response = self.ollama_client.chat(
                 self.model_name,
-                messages=[{
-                    'role': 'user',
-                    'content': context_prompt,
-                }],
+                messages=self._build_llm_messages(context_prompt),
                 options={
-                    # Add a reasonable timeout to ensure we don't get stuck
-                    "num_predict": 1024
+                    # Keep predictions short for latency and determinism
+                    "num_predict": 256,
+                    "temperature": 0.4,
+                    "top_p": 0.9,
+                    "repeat_penalty": 1.1,
                 }
             )
-            
+
             # Extract and return the content of the response
-            return response['message']['content']
+            content = response['message']['content']
+            self._cache_response(prompt, content)
+            return content
         except Exception as e:
             bt.logging.error(f"LLM query failed: {str(e)}")
             raise
+
+    def _build_llm_messages(self, prompt: str) -> List[Dict[str, str]]:
+        """Build deterministic, low-latency prompts for the LLM."""
+        return [
+            {
+                "role": "system",
+                "content": (
+                    "You generate alternative spellings for personal names. "
+                    "Return high-quality, culturally plausible spelling variants only. "
+                    "Respond concisely with a JSON object using the schema: "
+                    "{\"variations\": [\"alt1\", \"alt2\", ...]}. "
+                    f"Provide at most {self.max_variations} items."
+                ),
+            },
+            {
+                "role": "user",
+                "content": prompt,
+            },
+        ]
+
+    def _get_cached_response(self, prompt: str) -> Optional[str]:
+        """Retrieve a cached LLM response if available."""
+        cached = self._response_cache.get(prompt)
+        if cached is not None:
+            self._response_cache.move_to_end(prompt)
+        return cached
+
+    def _cache_response(self, prompt: str, response: str) -> None:
+        """Store the response while enforcing an upper bound on cache size."""
+        self._response_cache[prompt] = response
+        self._response_cache.move_to_end(prompt)
+        while len(self._response_cache) > self.cache_max_entries:
+            self._response_cache.popitem(last=False)
     
     def process_variations(self, Response_list: List[str], run_id: int, run_dir: str, identity_list: List[List[str]]) -> Dict[str, List[List[str]]]:
         """
@@ -637,6 +681,13 @@ Remember: Only provide the name variations in a clean, comma-separated format.
         
         # Extract the response payload
         payload = splits[-1]
+
+        json_result = self._try_parse_json_variations(payload, seed, is_multipart_name)
+        if json_result is not None:
+            parsed_seed, method, variations = json_result
+            if debug:
+                return parsed_seed, method, variations, payload
+            return parsed_seed, method, variations
         
         # Case 1: Comma-separated list (preferred format)
         if len(payload.split(",")) > 3:  # Check if we have at least 3 commas
@@ -729,9 +780,35 @@ Remember: Only provide the name variations in a clean, comma-separated format.
                         if not pd.isna(cleaned_var):
                             variations.append(cleaned_var)
                 
-                if debug:
-                    return seed, "r3", variations, payload
-                return seed, "r3", variations
+            if debug:
+                return seed, "r3", variations, payload
+            return seed, "r3", variations
+
+    def _try_parse_json_variations(
+        self, payload: str, seed: str, is_multipart_name: bool
+    ) -> Optional[Tuple[str, str, List[str]]]:
+        """Quickly parse structured JSON responses for lower latency processing."""
+        try:
+            cleaned_payload = payload.strip()
+            if "```" in cleaned_payload:
+                cleaned_payload = cleaned_payload.split("```json")[-1]
+                cleaned_payload = cleaned_payload.split("```")[-2] if "```" in cleaned_payload else cleaned_payload
+
+            data = json.loads(cleaned_payload)
+            variations_field = data.get("variations") if isinstance(data, dict) else None
+            if not isinstance(variations_field, list):
+                return None
+
+            variations: List[str] = []
+            for entry in variations_field:
+                cleaned_var = self.validate_variation(str(entry), seed, is_multipart_name)
+                if not pd.isna(cleaned_var):
+                    variations.append(cleaned_var)
+
+            return seed, "json", variations
+        except Exception as exc:
+            bt.logging.trace(f"JSON parsing failed, falling back to heuristic parser: {exc}")
+            return None
 
     async def blacklist(
         self, synapse: IdentitySynapse

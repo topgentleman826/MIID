@@ -49,8 +49,10 @@ different runs and facilitate analysis of results over time.
 
 import json
 import os
+import re
 import time
 import typing
+import traceback
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -116,8 +118,10 @@ class Miner(BaseMinerNeuron):
         
         self.model_name = getattr(self.config.neuron, 'model_name', None) if hasattr(self.config, 'neuron') else None
         if self.model_name is None:
-            self.model_name = 'tinyllama:latest'
+            # Use llama3.1 for better quality variations (8B model)
+            self.model_name = 'llama3.1:latest'
             bt.logging.info(f"No model specified in config, using default model: {self.model_name}")
+            bt.logging.info("RECOMMENDATION: For better scores, use 'llama3.1:latest' (8B) or 'llama3.3:latest' (70B)")
 
         bt.logging.info(f"Using LLM model: {self.model_name}")
 
@@ -292,31 +296,41 @@ class Miner(BaseMinerNeuron):
                 bt.logging.error(f"Error querying LLM for name {name}: {str(e)}")
                 Response_list.append("Error: " + str(e))
         
-        # Check if we've managed to process at least some names
-        if not processed_names:
-            bt.logging.error("Could not process any names within the timeout period")
-            synapse.variations = {}
-            return synapse
-        
         # Process the responses to extract variations, but be aware of remaining time
         remaining = timeout - (time.time() - start_time)
         bt.logging.info(f"Processing responses with {remaining:.1f}s remaining of {timeout:.1f}s timeout")
         
-        # Only proceed with processing if we have enough time
+        # Process variations even if we only got partial responses
+        variations = {}
         if remaining > 1.0:  # Ensure at least 1 second for processing
-            variations = self.process_variations(Response_list, run_id, run_dir, synapse.identity)
-            bt.logging.info(f"======== FINAL VARIATIONS===============================================: {variations}")
-            # Set the variations in the synapse for return to the validator
-            synapse.variations = variations
-        else:
-            bt.logging.warning(f"Insufficient time for processing responses, returning empty result")
-            synapse.variations = {}
+            try:
+                variations = self.process_variations(Response_list, run_id, run_dir, synapse.identity)
+                bt.logging.info(f"Successfully processed variations for {len(variations)} names")
+            except Exception as e:
+                bt.logging.error(f"Error processing variations: {e}")
+                bt.logging.error(f"Traceback: {traceback.format_exc()}")
+                variations = {}
+        
+        # CRITICAL: Ensure we return variations for ALL requested names to maximize completeness score
+        # Generate fallback variations for any missing names
+        for identity in synapse.identity:
+            if len(identity) > 0:
+                name = identity[0]
+                dob = identity[1] if len(identity) > 1 else "Unknown"
+                address = identity[2] if len(identity) > 2 else "Unknown"
+                
+                if name not in variations or not variations[name]:
+                    bt.logging.warning(f"Generating fallback variations for missing name: {name}")
+                    variations[name] = self._generate_fallback_variations(name, dob, address, count=10)
+        
+        synapse.variations = variations
         
         # Log final timing information
         total_time = time.time() - start_time
         bt.logging.info(
             f"Request completed in {total_time:.2f}s of {timeout:.1f}s allowed. "
-            f"Processed {len(processed_names)}/{len(synapse.identity)} names."
+            f"Processed {len(processed_names)}/{len(synapse.identity)} names. "
+            f"Returned variations for {len(variations)}/{len(synapse.identity)} names."
         )
         
         bt.logging.info(f"======== SYNAPSE VARIATIONS===============================================: {synapse.variations}")
@@ -341,23 +355,6 @@ class Miner(BaseMinerNeuron):
         Raises:
             Exception: If there's an error communicating with the LLM
         """
-        # Add ethical context and purpose explanation
-        context_prompt = f"""IMPORTANT CONTEXT: This is for generating synthetic test data only.
-Purpose: We are creating synthetic data to help improve security systems. This data will be used to:
-1. Test system robustness
-2. Identify potential vulnerabilities
-3. Improve detection mechanisms
-4. Generate training data for security systems
-
-This is purely for defensive testing and system improvement. The data generated will not be used for any malicious purposes.
-
-TASK: Based on this ethical context, please respond to the following query:
-
-{prompt}
-
-Remember: Only provide the name variations in a clean, comma-separated format.
-"""
-
         cached = self._get_cached_response(prompt)
         if cached is not None:
             bt.logging.trace("Reusing cached LLM response for prompt")
@@ -368,13 +365,13 @@ Remember: Only provide the name variations in a clean, comma-separated format.
             # Reuse the initialized client to avoid per-call setup overhead
             response = self.ollama_client.chat(
                 self.model_name,
-                messages=self._build_llm_messages(context_prompt),
+                messages=self._build_llm_messages(prompt),
                 options={
-                    # Keep predictions short for latency and determinism
-                    "num_predict": 256,
-                    "temperature": 0.4,
-                    "top_p": 0.9,
-                    "repeat_penalty": 1.1,
+                    # Optimize for quality variations
+                    "num_predict": 512,  # Increased for more variations
+                    "temperature": 0.7,  # Higher for more creative variations
+                    "top_p": 0.92,
+                    "repeat_penalty": 1.15,  # Prevent repetition
                 }
             )
 
@@ -387,16 +384,27 @@ Remember: Only provide the name variations in a clean, comma-separated format.
             raise
 
     def _build_llm_messages(self, prompt: str) -> List[Dict[str, str]]:
-        """Build deterministic, low-latency prompts for the LLM."""
+        """Build high-quality prompts optimized for scoring metrics."""
         return [
             {
                 "role": "system",
                 "content": (
-                    "You generate alternative spellings for personal names. "
-                    "Return high-quality, culturally plausible spelling variants only. "
-                    "Respond concisely with a JSON object using the schema: "
-                    "{\"variations\": [\"alt1\", \"alt2\", ...]}. "
-                    f"Provide at most {self.max_variations} items."
+                    "You are an expert at generating high-quality name variations for identity testing systems.\n\n"
+                    "CRITICAL REQUIREMENTS:\n"
+                    "1. Generate variations that sound similar (phonetically) AND look similar (orthographically)\n"
+                    "2. Keep similar length to the original name (±2 characters)\n"
+                    "3. Apply specific transformation rules:\n"
+                    "   - Replace vowels with similar vowels (e.g., 'a' → 'e', 'i' → 'y')\n"
+                    "   - Replace double letters with single (e.g., 'tt' → 't')\n"
+                    "   - Replace consonants with phonetically similar ones (e.g., 'ph' → 'f', 'c' → 'k')\n"
+                    "   - Add or remove silent letters (e.g., 'knight' → 'nite')\n"
+                    "   - Replace 'ch' with 'sh', 'k', or 'c'\n"
+                    "   - Use common misspellings and cultural variations\n"
+                    "4. Each variation must be realistic and plausible\n"
+                    "5. Ensure variations are UNIQUE (no duplicates)\n\n"
+                    f"Generate EXACTLY {self.max_variations} variations.\n"
+                    "Return ONLY a JSON object: {\"variations\": [\"variant1\", \"variant2\", ...]}\n"
+                    "DO NOT include explanations or additional text."
                 ),
             },
             {
@@ -461,9 +469,13 @@ Remember: Only provide the name variations in a clean, comma-separated format.
 
                 variations = [
                     var for var in llm_respond[2]
-                    if not pd.isna(var) and var != ""
+                    if not pd.isna(var) and var != "" and var.strip()
                 ]
                 variations = self._deduplicate_variations(variations)
+                
+                # Filter out variations that are too different in length (for better length score)
+                variations = self._filter_by_length(variations, name)
+                
                 if len(variations) > self.max_variations:
                     bt.logging.info(
                         f"Truncating variations for {name} to configured limit of {self.max_variations}"
@@ -472,19 +484,78 @@ Remember: Only provide the name variations in a clean, comma-separated format.
 
                 structured_variations = []
                 for var in variations:
-                    cleaned_var = var.replace(")", "").replace("(", "").replace("]", "").replace("[", "").replace(",", "")
-                    cleaned_var = cleaned_var.strip()
-                    if cleaned_var:
+                    # More aggressive cleaning but preserve name structure
+                    cleaned_var = var.strip()
+                    # Remove only problematic characters, keep hyphens and apostrophes
+                    cleaned_var = ''.join(c for c in cleaned_var if c.isalnum() or c in " '-")
+                    # Remove multiple spaces
+                    cleaned_var = ' '.join(cleaned_var.split())
+                    
+                    if cleaned_var and cleaned_var != name:  # Don't include exact match
+                        # Keep DOB and address consistent with seed (validators check this)
                         structured_variation = [cleaned_var, seed_dob, seed_address]
                         structured_variations.append(structured_variation)
+
+                # Ensure we have enough variations (completeness score)
+                if len(structured_variations) == 0:
+                    bt.logging.warning(f"No valid variations generated for {name}, creating fallback variations")
+                    structured_variations = self._generate_fallback_variations(name, seed_dob, seed_address)
 
                 name_variations[name] = structured_variations
                 bt.logging.info(f"Processed {len(structured_variations)} variations for {name}")
             except Exception as e:
                 bt.logging.error(f"Error processing response {i}: {e}")
+                bt.logging.error(f"Traceback: {traceback.format_exc()}")
 
         bt.logging.info(f"Generated structured variations: {name_variations}")
         return name_variations
+    
+    def _filter_by_length(self, variations: List[str], original: str) -> List[str]:
+        """Filter variations to keep only those with similar length to original (±4 chars for better length score)."""
+        original_len = len(original)
+        filtered = []
+        for var in variations:
+            # Allow ±4 characters difference for optimal length score
+            if abs(len(var) - original_len) <= 4:
+                filtered.append(var)
+            else:
+                bt.logging.debug(f"Filtered out '{var}' due to length difference from '{original}'")
+        return filtered if filtered else variations[:self.max_variations]  # Keep at least some variations
+    
+    def _generate_fallback_variations(self, name: str, dob: str, address: str, count: int = 5) -> List[List[str]]:
+        """Generate basic fallback variations using simple rules when LLM fails."""
+        variations = []
+        name_lower = name.lower()
+        
+        # Apply simple transformation rules
+        rules = [
+            lambda n: n.replace('a', 'e'),
+            lambda n: n.replace('e', 'a'),
+            lambda n: n.replace('i', 'y'),
+            lambda n: n.replace('y', 'i'),
+            lambda n: n.replace('ph', 'f'),
+            lambda n: n.replace('c', 'k'),
+            lambda n: n.replace('s', 'z'),
+            lambda n: n.replace('tt', 't'),
+            lambda n: n.replace('nn', 'n'),
+            lambda n: n.replace('ll', 'l'),
+        ]
+        
+        seen = {name_lower}
+        for rule in rules:
+            if len(variations) >= count:
+                break
+            try:
+                variant = rule(name_lower)
+                if variant not in seen and variant != name_lower:
+                    # Capitalize properly
+                    variant = ' '.join(word.capitalize() for word in variant.split())
+                    variations.append([variant, dob, address])
+                    seen.add(variant.lower())
+            except:
+                continue
+        
+        return variations[:count]
     
     def save_variations_to_json(self, name_variations: Dict[str, List[str]], run_id: int, run_dir: str) -> None:
         """
@@ -611,6 +682,11 @@ Remember: Only provide the name variations in a clean, comma-separated format.
         if not name or name.isspace():
             return np.nan
 
+        # Remove common prefixes from LLM responses
+        for prefix in ["Variation:", "Alt:", "Alternative:", "-", "*", "•"]:
+            if name.startswith(prefix):
+                name = name[len(prefix):].strip()
+        
         # Normalize whitespace within the name
         name = " ".join(name.split())
         
@@ -618,21 +694,40 @@ Remember: Only provide the name variations in a clean, comma-separated format.
         if ":" in name:
             name = name.split(":")[-1].strip()
         
-        # Check length reasonability (variation shouldn't be more than 2x the seed length)
-        if len(name) > 2 * len(seed):
+        # Remove numbering (e.g., "1. Name" or "1) Name")
+        name = re.sub(r'^\d+[\.\)]\s*', '', name)
+        
+        # Skip if empty after cleaning
+        if not name or name.isspace():
             return np.nan
         
-        # Check structure consistency with seed name
+        # Skip if it's just the seed name (exact match)
+        if name.lower() == seed.lower():
+            return np.nan
+        
+        # Check length reasonability - be more lenient (±4 characters is acceptable)
+        # This helps with length score
+        if abs(len(name) - len(seed)) > 4:
+            bt.logging.debug(f"Skipping variation '{name}' - length difference too large from '{seed}'")
+            return np.nan
+        
+        # Check structure consistency with seed name (but be more lenient)
         name_parts = name.split()
+        seed_parts = seed.split()
+        
         if is_multipart_name:
-            # For multi-part seed names (e.g., "John Smith"), variations must also have multiple parts
-            if len(name_parts) < 2:
-                bt.logging.warning(f"Skipping single-part variation '{name}' for multi-part seed '{seed}'")
+            # For multi-part seed names (e.g., "John Smith"), variations should also have multiple parts
+            # But allow some flexibility (e.g., 2-part seed can have 1-3 part variations)
+            if len(name_parts) < 1:
+                return np.nan
+            # Be more lenient - allow variations with different number of parts if close
+            if abs(len(name_parts) - len(seed_parts)) > 1:
+                bt.logging.debug(f"Skipping variation '{name}' - part count too different from '{seed}'")
                 return np.nan
         else:
-            # For single-part seed names (e.g., "John"), variations must be single part
-            if len(name_parts) > 1:
-                bt.logging.warning(f"Skipping multi-part variation '{name}' for single-part seed '{seed}'")
+            # For single-part seed names, prefer single-part variations but allow 2-part
+            if len(name_parts) > 2:
+                bt.logging.debug(f"Skipping multi-part variation '{name}' for single-part seed '{seed}'")
                 return np.nan
             
         return name
@@ -790,24 +885,57 @@ Remember: Only provide the name variations in a clean, comma-separated format.
         """Quickly parse structured JSON responses for lower latency processing."""
         try:
             cleaned_payload = payload.strip()
+            
+            # Try multiple extraction strategies
+            # Strategy 1: Extract from markdown code blocks
             if "```" in cleaned_payload:
-                cleaned_payload = cleaned_payload.split("```json")[-1]
-                cleaned_payload = cleaned_payload.split("```")[-2] if "```" in cleaned_payload else cleaned_payload
+                # Try json code block first
+                json_match = re.search(r'```json\s*(\{.*?\})\s*```', cleaned_payload, re.DOTALL)
+                if json_match:
+                    cleaned_payload = json_match.group(1)
+                else:
+                    # Try plain code block
+                    code_match = re.search(r'```\s*(\{.*?\})\s*```', cleaned_payload, re.DOTALL)
+                    if code_match:
+                        cleaned_payload = code_match.group(1)
+            
+            # Strategy 2: Find JSON object directly
+            if not cleaned_payload.strip().startswith('{'):
+                json_obj_match = re.search(r'\{[^{}]*"variations"[^{}]*\[[^\]]*\][^{}]*\}', cleaned_payload, re.DOTALL)
+                if json_obj_match:
+                    cleaned_payload = json_obj_match.group(0)
 
             data = json.loads(cleaned_payload)
             variations_field = data.get("variations") if isinstance(data, dict) else None
             if not isinstance(variations_field, list):
+                bt.logging.debug("No 'variations' list found in JSON response")
                 return None
 
             variations: List[str] = []
             for entry in variations_field:
-                cleaned_var = self.validate_variation(str(entry), seed, is_multipart_name)
-                if not pd.isna(cleaned_var):
+                # Handle both string entries and dict entries
+                if isinstance(entry, dict):
+                    # Try common keys that might contain the variation
+                    variation_str = entry.get('name') or entry.get('variation') or entry.get('value') or str(entry)
+                else:
+                    variation_str = str(entry)
+                
+                cleaned_var = self.validate_variation(variation_str, seed, is_multipart_name)
+                if not pd.isna(cleaned_var) and cleaned_var.strip():
                     variations.append(cleaned_var)
 
-            return seed, "json", variations
+            if variations:
+                bt.logging.debug(f"Successfully extracted {len(variations)} variations from JSON")
+                return seed, "json", variations
+            else:
+                bt.logging.debug("No valid variations found in JSON response")
+                return None
+                
+        except json.JSONDecodeError as exc:
+            bt.logging.trace(f"JSON parsing failed: {exc}")
+            return None
         except Exception as exc:
-            bt.logging.trace(f"JSON parsing failed, falling back to heuristic parser: {exc}")
+            bt.logging.trace(f"JSON parsing error, falling back to heuristic parser: {exc}")
             return None
 
     async def blacklist(

@@ -53,6 +53,7 @@ import re
 import time
 import typing
 import traceback
+import unicodedata
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -129,6 +130,7 @@ class Miner(BaseMinerNeuron):
         self.max_variations = getattr(self.config.neuron, 'max_variations', 25)
         self.ollama_host = getattr(self.config.neuron, 'ollama_url', 'http://127.0.0.1:11434')
         self.cache_max_entries = getattr(self.config.neuron, 'response_cache_size', 128)
+        self.target_variations = getattr(self.config.neuron, 'target_variations', self.max_variations)
         self._response_cache: OrderedDict[str, str] = OrderedDict()
         self.ollama_client = self._initialize_ollama_client()
         bt.logging.info(
@@ -472,7 +474,7 @@ class Miner(BaseMinerNeuron):
                     if not pd.isna(var) and var != "" and var.strip()
                 ]
                 variations = self._deduplicate_variations(variations)
-                
+
                 # Filter out variations that are too different in length (for better length score)
                 variations = self._filter_by_length(variations, name)
                 
@@ -496,10 +498,18 @@ class Miner(BaseMinerNeuron):
                         structured_variation = [cleaned_var, seed_dob, seed_address]
                         structured_variations.append(structured_variation)
 
+                structured_variations = self._pad_structured_variations(
+                    name, seed_dob, seed_address, structured_variations
+                )
+
                 # Ensure we have enough variations (completeness score)
                 if len(structured_variations) == 0:
                     bt.logging.warning(f"No valid variations generated for {name}, creating fallback variations")
                     structured_variations = self._generate_fallback_variations(name, seed_dob, seed_address)
+
+                structured_variations = self._pad_structured_variations(
+                    name, seed_dob, seed_address, structured_variations
+                )
 
                 name_variations[name] = structured_variations
                 bt.logging.info(f"Processed {len(structured_variations)} variations for {name}")
@@ -523,39 +533,125 @@ class Miner(BaseMinerNeuron):
         return filtered if filtered else variations[:self.max_variations]  # Keep at least some variations
     
     def _generate_fallback_variations(self, name: str, dob: str, address: str, count: int = 5) -> List[List[str]]:
-        """Generate basic fallback variations using simple rules when LLM fails."""
-        variations = []
-        name_lower = name.lower()
-        
-        # Apply simple transformation rules
-        rules = [
-            lambda n: n.replace('a', 'e'),
-            lambda n: n.replace('e', 'a'),
-            lambda n: n.replace('i', 'y'),
-            lambda n: n.replace('y', 'i'),
-            lambda n: n.replace('ph', 'f'),
-            lambda n: n.replace('c', 'k'),
-            lambda n: n.replace('s', 'z'),
-            lambda n: n.replace('tt', 't'),
-            lambda n: n.replace('nn', 'n'),
-            lambda n: n.replace('ll', 'l'),
-        ]
-        
-        seen = {name_lower}
-        for rule in rules:
-            if len(variations) >= count:
+        """Generate high-quality fallback variations using phonetic and orthographic rules."""
+        generated: List[List[str]] = []
+        for candidate in self._generate_rule_based_variations(name, count * 2):
+            if len(generated) >= count:
                 break
-            try:
-                variant = rule(name_lower)
-                if variant not in seen and variant != name_lower:
-                    # Capitalize properly
-                    variant = ' '.join(word.capitalize() for word in variant.split())
-                    variations.append([variant, dob, address])
-                    seen.add(variant.lower())
-            except:
+
+            normalized = candidate.lower()
+            if normalized == name.lower():
                 continue
-        
-        return variations[:count]
+
+            generated.append([candidate, dob, address])
+
+        if not generated:
+            # Ensure we always return something to avoid completeness penalties
+            generated.append([name, dob, address])
+
+        return generated[:count]
+
+    def _pad_structured_variations(
+        self,
+        seed_name: str,
+        seed_dob: str,
+        seed_address: str,
+        structured_variations: List[List[str]],
+    ) -> List[List[str]]:
+        """Top up structured variations with deterministic rule-based candidates for better count/uniqueness scores."""
+        target_count = min(self.target_variations, self.max_variations)
+
+        existing = {variation[0].lower() for variation in structured_variations}
+        if len(structured_variations) >= target_count:
+            return structured_variations[:target_count]
+
+        for candidate in self._generate_rule_based_variations(seed_name, target_count * 2):
+            if len(structured_variations) >= target_count:
+                break
+
+            normalized = candidate.lower()
+            if normalized in existing or normalized == seed_name.lower():
+                continue
+
+            structured_variations.append([candidate, seed_dob, seed_address])
+            existing.add(normalized)
+
+        return structured_variations
+
+    def _generate_rule_based_variations(self, seed_name: str, max_candidates: int) -> List[str]:
+        """Create deterministic, score-friendly variations using phonetic and orthographic tweaks."""
+        replacements: List[Tuple[str, str]] = [
+            ("ph", "f"),
+            ("th", "t"),
+            ("ck", "k"),
+            ("c", "k"),
+            ("k", "c"),
+            ("s", "z"),
+            ("z", "s"),
+            ("ie", "y"),
+            ("y", "i"),
+            ("tt", "t"),
+            ("nn", "n"),
+            ("ll", "l"),
+            ("gh", "g"),
+            ("qu", "kw"),
+            ("v", "f"),
+        ]
+
+        seed_parts = seed_name.split()
+        is_multipart = len(seed_parts) > 1
+        candidates: List[str] = []
+        seen: set[str] = set()
+
+        def format_parts(parts: List[str]) -> str:
+            return " ".join(part.capitalize() for part in parts)
+
+        for idx, part in enumerate(seed_parts):
+            lower_part = part.lower()
+            for src, tgt in replacements:
+                if src not in lower_part:
+                    continue
+
+                replaced = lower_part.replace(src, tgt)
+                if replaced == lower_part:
+                    continue
+
+                new_parts = seed_parts.copy()
+                new_parts[idx] = replaced
+
+                candidate = format_parts(new_parts)
+                if self._is_candidate_reasonable(candidate, seed_name, is_multipart):
+                    normalized = candidate.lower()
+                    if normalized not in seen:
+                        candidates.append(candidate)
+                        seen.add(normalized)
+
+                if len(candidates) >= max_candidates:
+                    return candidates
+
+        # Add vowel swaps across the full name for better phonetic spread
+        vowel_swaps = [("a", "e"), ("e", "a"), ("o", "u"), ("u", "o"), ("i", "y"), ("y", "i")]
+        lower_full = seed_name.lower()
+        for src, tgt in vowel_swaps:
+            if src not in lower_full:
+                continue
+            swapped = lower_full.replace(src, tgt)
+            candidate = format_parts(swapped.split())
+            if self._is_candidate_reasonable(candidate, seed_name, is_multipart):
+                normalized = candidate.lower()
+                if normalized not in seen:
+                    candidates.append(candidate)
+                    seen.add(normalized)
+
+            if len(candidates) >= max_candidates:
+                break
+
+        return candidates[:max_candidates]
+
+    def _is_candidate_reasonable(self, candidate: str, seed: str, is_multipart: bool) -> bool:
+        """Validate deterministic candidates using the same rules as LLM variations."""
+        cleaned_candidate = self.validate_variation(candidate, seed, is_multipart)
+        return not pd.isna(cleaned_candidate)
     
     def save_variations_to_json(self, name_variations: Dict[str, List[str]], run_id: int, run_dir: str) -> None:
         """
@@ -678,6 +774,8 @@ class Miner(BaseMinerNeuron):
         Returns:
             str: The validated and cleaned variation, or np.nan if invalid
         """
+        name = unicodedata.normalize("NFKD", name)
+        name = "".join(ch for ch in name if not unicodedata.combining(ch))
         name = name.strip()
         if not name or name.isspace():
             return np.nan
@@ -689,6 +787,11 @@ class Miner(BaseMinerNeuron):
         
         # Normalize whitespace within the name
         name = " ".join(name.split())
+
+        # Reject names containing unexpected symbols to avoid penalties
+        if not re.match(r"^[A-Za-z]+([ '\-][A-Za-z]+)*$", name):
+            bt.logging.debug(f"Skipping variation '{name}' due to unexpected characters")
+            return np.nan
         
         # Handle cases with colons (e.g., "Here are variations: Name")
         if ":" in name:

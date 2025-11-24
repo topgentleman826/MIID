@@ -590,7 +590,7 @@ class Miner(BaseMinerNeuron):
                     missing_names.append(name)
                 elif len(filtered_variations[name]) < self.max_variations:
                     # Pad existing variations to meet target count for better count score
-                    bt.logging.info(f"Padding variations for {name} from {len(filtered_variations[name])} to {self.max_variations}")
+                    bt.logging.debug(f"Padding variations for {name} from {len(filtered_variations[name])} to {self.max_variations}")
                     current_count = len(filtered_variations[name])
                     needed = self.max_variations - current_count
                     additional = self._generate_fallback_variations(name, dob, address, count=needed)
@@ -1476,8 +1476,12 @@ class Miner(BaseMinerNeuron):
                     break
 
         # CRITICAL: If we still don't have enough, pad with safe variations
-        while len(structured) < min(target_count, self.max_variations):
-            bt.logging.warning(f"Padding variations for {name} to meet minimum count")
+        padding_notified = False
+        max_required = min(target_count, self.max_variations)
+        while len(structured) < max_required:
+            if not padding_notified:
+                bt.logging.warning(f"Padding variations for {name} to meet minimum count")
+                padding_notified = True
             # Create safe variations by cycling through vowel changes
             base_variant = self._create_safe_variant(name, len(structured))
             if base_variant and base_variant.lower() not in existing_variations:

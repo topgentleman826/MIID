@@ -50,12 +50,19 @@ different runs and facilitate analysis of results over time.
 import json
 import os
 import re
+import sys
 import time
 import typing
 import traceback
 import unicodedata
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple, Set
+
+# Ensure the repository root is on sys.path when launched from PM2/other cwd.
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(CURRENT_DIR)
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
 
 import bittensor as bt
 import jellyfish
@@ -107,6 +114,17 @@ class Miner(BaseMinerNeuron):
         "5CnkkjPdfsA6jJDHv2U6QuiKiivDuvQpECC13ffdmSDbkgtt": "Testnet_asem"
     }
 
+    @staticmethod
+    def _safe_positive_int(value: Any, default: int) -> int:
+        """Return a positive int or fallback to default."""
+        try:
+            int_value = int(value)
+            if int_value > 0:
+                return int_value
+        except (TypeError, ValueError):
+            pass
+        return default
+
     def __init__(self, config=None):
         """
         Initialize the Name Variation Miner.
@@ -119,7 +137,10 @@ class Miner(BaseMinerNeuron):
         """
         super(Miner, self).__init__(config=config)
         
-        self.model_name = getattr(self.config.neuron, 'model_name', None) if hasattr(self.config, 'neuron') else None
+        neuron_cfg = getattr(self.config, 'neuron', None)
+        logging_cfg = getattr(self.config, 'logging', None)
+
+        self.model_name = getattr(neuron_cfg, 'model_name', None) if neuron_cfg else None
         if self.model_name is None:
             # Use llama3.1 for optimal balance of quality and speed (8B model)
             # This provides excellent phonetic/orthographic accuracy for scoring
@@ -147,23 +168,20 @@ class Miner(BaseMinerNeuron):
         bt.logging.info("   ✓ 30 variations per identity (maximizes count score)")
 
         # Configure output limits and client reuse for better resiliency
-        # MAXIMUM variations (35) for best count score - targeting 86.52%+ total score
-        config_max_variations = getattr(self.config.neuron, 'max_variations', None)
-        if not isinstance(config_max_variations, int) or config_max_variations <= 0:
-            config_max_variations = 35
-        self.max_variations = config_max_variations
+        # PM2 can pass None/string values, so coerce everything safely.
+        config_max_variations = getattr(neuron_cfg, 'max_variations', None) if neuron_cfg else None
+        self.max_variations = self._safe_positive_int(config_max_variations, default=35)
 
-        self.ollama_host = getattr(self.config.neuron, 'ollama_url', 'http://127.0.0.1:11434')
+        self.ollama_host = getattr(neuron_cfg, 'ollama_url', 'http://127.0.0.1:11434') if neuron_cfg else 'http://127.0.0.1:11434'
 
-        cache_max_entries = getattr(self.config.neuron, 'response_cache_size', None)
-        if not isinstance(cache_max_entries, int) or cache_max_entries <= 0:
-            cache_max_entries = 128
-        self.cache_max_entries = cache_max_entries
+        cache_max_entries = getattr(neuron_cfg, 'response_cache_size', None) if neuron_cfg else None
+        self.cache_max_entries = self._safe_positive_int(cache_max_entries, default=128)
 
-        target_variations = getattr(self.config.neuron, 'target_variations', None)
-        if not isinstance(target_variations, int) or target_variations <= 0:
-            target_variations = self.max_variations
-        self.target_variations = min(target_variations, self.max_variations)
+        target_variations = getattr(neuron_cfg, 'target_variations', None) if neuron_cfg else None
+        self.target_variations = min(
+            self._safe_positive_int(target_variations, default=self.max_variations),
+            self.max_variations,
+        )
         self._response_cache: OrderedDict[str, str] = OrderedDict()
         self.ollama_client = self._initialize_ollama_client()
         bt.logging.info(
@@ -175,7 +193,8 @@ class Miner(BaseMinerNeuron):
         
         # Create a directory for storing mining results
         # This helps with debugging and analysis
-        self.output_path = os.path.join(self.config.logging.logging_dir, "mining_results")
+        logging_dir = getattr(logging_cfg, 'logging_dir', os.path.join(REPO_ROOT, "logs"))
+        self.output_path = os.path.join(logging_dir, "mining_results")
         os.makedirs(self.output_path, exist_ok=True)
         bt.logging.info(f"Mining results will be saved to: {self.output_path}")
         self.axon.verify_fns[IdentitySynapse.__name__] = self._verify_validator_request

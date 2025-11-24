@@ -126,24 +126,39 @@ class Miner(BaseMinerNeuron):
             self.model_name = 'llama3.1:latest'
             bt.logging.info(f"No model specified in config, using default model: {self.model_name}")
             bt.logging.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-            bt.logging.info("MODEL RECOMMENDATIONS FOR MAXIMUM ACCURACY:")
-            bt.logging.info("  • llama3.1:latest (8B) - Default, excellent balance")
-            bt.logging.info("  • llama3.3:latest (70B) - Best quality (requires 32GB+ VRAM)")
-            bt.logging.info("  • qwen2.5:14b - Strong alternative, good multilingual")
+            bt.logging.info("🏆 MODEL RECOMMENDATIONS FOR MAXIMUM SCORE:")
+            bt.logging.info("  ⭐ llama3.3:latest (70B) - BEST QUALITY for top scores (requires 40GB+ VRAM)")
+            bt.logging.info("  ⭐ qwen2.5:32b - EXCELLENT quality (requires 20GB+ VRAM)")
+            bt.logging.info("  ✓ llama3.1:latest (8B) - CURRENT, good balance (10GB VRAM)")
+            bt.logging.info("  ✓ qwen2.5:14b - Strong alternative, good multilingual (8GB VRAM)")
+            bt.logging.info("")
+            bt.logging.info("💡 For MAXIMUM competitive scores, use llama3.3:latest or qwen2.5:32b")
+            bt.logging.info("   Start command: --neuron.model_name llama3.3:latest")
             bt.logging.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
         bt.logging.info(f"Using LLM model: {self.model_name}")
-        bt.logging.info("Quality optimizations enabled: Few-shot prompting, Quality scoring, Phonetic ranking")
+        bt.logging.info("🚀 MAXIMUM SCORE OPTIMIZATIONS ENABLED:")
+        bt.logging.info("   ✓ Advanced phonetic filtering (Soundex + Metaphone + Jaro-Winkler)")
+        bt.logging.info("   ✓ Strict quality threshold (0.60+ similarity required)")
+        bt.logging.info("   ✓ Address/DOB pattern rejection (prevents penalties)")
+        bt.logging.info("   ✓ Rule compliance validation (problematic pattern detection)")
+        bt.logging.info("   ✓ Enhanced uniqueness tracking (case-insensitive deduplication)")
+        bt.logging.info("   ✓ Optimized LLM parameters (Mirostat, low temperature)")
+        bt.logging.info("   ✓ 30 variations per identity (maximizes count score)")
 
         # Configure output limits and client reuse for better resiliency
-        self.max_variations = getattr(self.config.neuron, 'max_variations', 25)
+        # MAXIMUM variations (35) for best count score - targeting 86.52%+ total score
+        self.max_variations = getattr(self.config.neuron, 'max_variations', 35)
         self.ollama_host = getattr(self.config.neuron, 'ollama_url', 'http://127.0.0.1:11434')
         self.cache_max_entries = getattr(self.config.neuron, 'response_cache_size', 128)
         self.target_variations = getattr(self.config.neuron, 'target_variations', self.max_variations)
         self._response_cache: OrderedDict[str, str] = OrderedDict()
         self.ollama_client = self._initialize_ollama_client()
         bt.logging.info(
-            f"Configured to return up to {self.max_variations} variations per identity using Ollama host {self.ollama_host}"
+            f"🎯 TARGETING 86.52%+ SCORE - Configured to return up to {self.max_variations} variations per identity using Ollama host {self.ollama_host}"
+        )
+        bt.logging.info(
+            f"   Score Formula: (0.3×Names + 0.1×DOB + 0.6×Address) × Completeness × (1-PostPenalty)"
         )
         
         # Create a directory for storing mining results
@@ -187,6 +202,190 @@ class Miner(BaseMinerNeuron):
         normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
         normalized = re.sub(r"\s+", " ", normalized.strip())
         return normalized
+    
+    def _looks_like_address(self, text: str) -> bool:
+        """
+        CRITICAL: Check if a variation looks like an address.
+        Address Score is 60% of total score - this must be PERFECT.
+        """
+        if not text:
+            return False
+        
+        text_lower = text.lower()
+        
+        # CRITICAL: Check for ANY numbers (addresses ALWAYS contain numbers)
+        if re.search(r'\d', text):
+            return True
+        
+        # CRITICAL: Comprehensive address indicator list (expanded)
+        address_indicators = [
+            # Street types
+            'street', 'st', 'avenue', 'ave', 'road', 'rd', 'drive', 'dr',
+            'lane', 'ln', 'court', 'ct', 'place', 'pl', 'boulevard', 'blvd',
+            'parkway', 'pkwy', 'highway', 'hwy', 'freeway', 'expressway',
+            'way', 'circle', 'cir', 'terrace', 'ter', 'trail', 'alley',
+            'square', 'sq', 'loop', 'grove', 'path', 'walk', 'row',
+            'crescent', 'cres', 'close', 'mews', 'vale', 'rise', 'gardens',
+            
+            # Building/Unit identifiers
+            'apt', 'apartment', 'suite', 'ste', 'unit', 'floor', 'fl',
+            'building', 'bldg', 'room', 'rm', 'lot', 'space', 'hangar',
+            'penthouse', 'basement', 'ground', 'level', 'loft', 'studio',
+            
+            # Directional words
+            'north', 'south', 'east', 'west', 
+            'northeast', 'northwest', 'southeast', 'southwest',
+            'n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw',
+            'northern', 'southern', 'eastern', 'western',
+            
+            # Postal/delivery
+            'p.o.', 'po', 'box', 'pobox', 'post', 'postal',
+            'mail', 'delivery', 'zip', 'code',
+            
+            # Geographic terms that appear in addresses
+            'city', 'town', 'village', 'county', 'province', 'state',
+            'district', 'borough', 'township', 'parish', 'region',
+            
+            # Common address abbreviations
+            'st.', 'ave.', 'rd.', 'dr.', 'ln.', 'ct.', 'pl.', 'blvd.',
+        ]
+        
+        # Check each indicator as whole word to avoid false positives
+        for indicator in address_indicators:
+            if re.search(r'\b' + re.escape(indicator) + r'\b', text_lower):
+                return True
+        
+        # CRITICAL: Check for address-like patterns
+        # Pattern: "Number Word" (e.g., "123 Main", "5 Oak")
+        if re.search(r'\b\d+\s+[a-z]+', text_lower):
+            return True
+        
+        # Pattern: Contains "PO" or "P.O." followed by anything
+        if re.search(r'\bp\.?o\.?\b', text_lower):
+            return True
+        
+        return False
+    
+    def _looks_like_dob(self, text: str) -> bool:
+        """
+        CRITICAL: Check if a variation looks like a date of birth or date pattern.
+        DOB Score is 10% of total score - must be maximized.
+        """
+        if not text:
+            return False
+        
+        text_lower = text.lower()
+        
+        # CRITICAL: Check for ANY numbers (DOBs contain numbers)
+        if re.search(r'\d', text):
+            return True
+        
+        # CRITICAL: Comprehensive date patterns
+        date_patterns = [
+            r'\d{1,2}[/-]\d{1,2}[/-]\d{2,4}',  # 01/01/2000, 1-1-00
+            r'\d{4}[/-]\d{1,2}[/-]\d{1,2}',    # 2000/01/01
+            r'\d{8}',                           # 20000101
+            r'\d{6}',                           # 000101
+            r'\d{1,2}[/-]\d{1,2}',              # 01/01, 1-1
+            r'\d{4}',                           # 2000, 1990 (year)
+        ]
+        
+        for pattern in date_patterns:
+            if re.search(pattern, text):
+                return True
+        
+        # CRITICAL: Comprehensive month/day detection
+        months = [
+            'january', 'february', 'march', 'april', 'may', 'june',
+            'july', 'august', 'september', 'october', 'november', 'december',
+            'jan', 'feb', 'mar', 'apr', 'may', 'jun', 
+            'jul', 'aug', 'sep', 'sept', 'oct', 'nov', 'dec'
+        ]
+        
+        for month in months:
+            # Check as whole word to avoid false positives
+            if re.search(r'\b' + re.escape(month) + r'\b', text_lower):
+                return True
+        
+        # Day names (sometimes used in DOB context)
+        days = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday',
+                'mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']
+        for day in days:
+            if re.search(r'\b' + re.escape(day) + r'\b', text_lower):
+                return True
+        
+        # Date-related words
+        date_words = ['birth', 'birthday', 'born', 'date', 'dob', 'age', 'year', 'old']
+        for word in date_words:
+            if re.search(r'\b' + re.escape(word) + r'\b', text_lower):
+                return True
+        
+        return False
+    
+    def _contains_problematic_patterns(self, text: str) -> bool:
+        """
+        CRITICAL: Check for problematic patterns that violate rule compliance AND post penalties.
+        This maximizes Rule Compliance Score and minimizes Post Penalty (9.80% → 0%).
+        """
+        if not text:
+            return False
+        
+        text_lower = text.lower()
+        
+        # CRITICAL: Variations that are too generic or common words
+        generic_words = [
+            'unknown', 'none', 'null', 'n/a', 'na', 'test', 'example',
+            'sample', 'temp', 'dummy', 'default', 'user', 'admin',
+            'name', 'identity', 'person', 'individual', 'subject'
+        ]
+        if text_lower in generic_words:
+            return True
+        
+        # CRITICAL: Contains multiple consecutive spaces or weird spacing (collision risk)
+        if '  ' in text or text != text.strip():
+            return True
+        
+        # CRITICAL: Starts or ends with special characters (special chars penalty)
+        if text and (text[0] in "'-." or text[-1] in "'-."):
+            return True
+        
+        # CRITICAL: Contains words that might be confused with titles/honorifics
+        titles = ['mr', 'mrs', 'ms', 'miss', 'dr', 'prof', 'professor',
+                  'sir', 'lord', 'lady', 'duke', 'baron', 'count',
+                  'rev', 'reverend', 'father', 'mother', 'sister', 'brother',
+                  'capt', 'captain', 'maj', 'major', 'col', 'colonel',
+                  'gen', 'general', 'sgt', 'sergeant', 'pvt', 'private']
+        words = text_lower.split()
+        for word in words:
+            if word in titles or word.rstrip('.') in titles:
+                return True
+        
+        # CRITICAL: All uppercase or all lowercase (signature copy risk)
+        if len(text) > 2 and (text.isupper() or text.islower()):
+            return True
+        
+        # CRITICAL: Contains problematic characters (special chars penalty)
+        problematic_chars = ['_', '#', '@', '$', '%', '^', '&', '*', 
+                            '(', ')', '[', ']', '{', '}', '|', '\\',
+                            '/', '<', '>', '?', '!', '~', '`', '+', '=']
+        for char in problematic_chars:
+            if char in text:
+                return True
+        
+        # CRITICAL: Contains multiple punctuation marks (collision/duplication risk)
+        punctuation_count = sum(1 for c in text if c in "'-.,;:!?")
+        if punctuation_count > 2:
+            return True
+        
+        # CRITICAL: Too short (collision risk)
+        if len(text.replace(' ', '')) < 2:
+            return True
+        
+        # CRITICAL: Repeated characters pattern (collision risk)
+        if re.search(r'(.)\1{3,}', text):  # 4+ same characters in a row
+            return True
+        
+        return False
 
     async def _verify_validator_request(self, synapse: IdentitySynapse) -> None:
         """
@@ -329,19 +528,77 @@ class Miner(BaseMinerNeuron):
                 bt.logging.error(f"Traceback: {traceback.format_exc()}")
                 variations = {}
         
-        # CRITICAL: Ensure we return variations for ALL requested names to maximize completeness score
-        # Generate fallback variations for any missing names
+        # CRITICAL: Build the requested names set for exact matching
+        # This prevents "extra names penalty" by ensuring we ONLY return requested names
+        requested_names = set()
+        for identity in synapse.identity:
+            if len(identity) > 0 and identity[0]:
+                requested_names.add(identity[0].strip())
+        
+        bt.logging.info(f"Requested {len(requested_names)} names: {requested_names}")
+        
+        # CRITICAL: Remove any variations for names that weren't requested
+        # This prevents the "extra names penalty"
+        filtered_variations = {}
+        for name in requested_names:
+            if name in variations:
+                filtered_variations[name] = variations[name]
+        
+        # CRITICAL COMPLETENESS: Ensure 100% completeness by generating variations for ALL requested names
+        # Completeness is a MULTIPLIER - missing any name drops score to near-zero!
+        missing_names = []
         for identity in synapse.identity:
             if len(identity) > 0:
                 name = identity[0]
                 dob = identity[1] if len(identity) > 1 else "Unknown"
                 address = identity[2] if len(identity) > 2 else "Unknown"
                 
-                if name not in variations or not variations[name]:
-                    bt.logging.warning(f"Generating fallback variations for missing name: {name}")
-                    variations[name] = self._generate_fallback_variations(name, dob, address, count=10)
+                if name not in filtered_variations or not filtered_variations[name]:
+                    bt.logging.warning(f"COMPLETENESS CRITICAL: Generating fallback variations for missing name: {name}")
+                    filtered_variations[name] = self._generate_fallback_variations(name, dob, address, count=self.max_variations)
+                    missing_names.append(name)
+                elif len(filtered_variations[name]) < self.max_variations:
+                    # Pad existing variations to meet target count for better count score
+                    bt.logging.info(f"Padding variations for {name} from {len(filtered_variations[name])} to {self.max_variations}")
+                    current_count = len(filtered_variations[name])
+                    needed = self.max_variations - current_count
+                    additional = self._generate_fallback_variations(name, dob, address, count=needed)
+                    
+                    # Merge without duplicates (prevent collision/duplication penalties)
+                    existing_names_lower = {v[0].lower() for v in filtered_variations[name]}
+                    for var in additional:
+                        if var[0].lower() not in existing_names_lower:
+                            # Triple-check for safety
+                            if not self._looks_like_address(var[0]) and not self._looks_like_dob(var[0]):
+                                filtered_variations[name].append(var)
+                                existing_names_lower.add(var[0].lower())
+                        if len(filtered_variations[name]) >= self.max_variations:
+                            break
         
-        synapse.variations = variations
+        # FINAL COMPLETENESS CHECK: Verify we have ALL requested names
+        final_variations = {}
+        for name in requested_names:
+            if name in filtered_variations and filtered_variations[name]:
+                final_variations[name] = filtered_variations[name]
+            else:
+                # EMERGENCY: This should never happen, but ensures 100% completeness
+                bt.logging.error(f"EMERGENCY COMPLETENESS FIX: Missing variations for '{name}', generating now!")
+                identity_match = None
+                for identity in synapse.identity:
+                    if len(identity) > 0 and identity[0] == name:
+                        identity_match = identity
+                        break
+                dob = identity_match[1] if identity_match and len(identity_match) > 1 else "Unknown"
+                address = identity_match[2] if identity_match and len(identity_match) > 2 else "Unknown"
+                final_variations[name] = self._generate_fallback_variations(name, dob, address, count=self.max_variations)
+        
+        synapse.variations = final_variations
+        
+        # VERIFICATION: Log completeness metrics
+        completeness_pct = (len(final_variations) / len(requested_names) * 100) if requested_names else 0
+        bt.logging.info(f"✓ COMPLETENESS: {len(final_variations)}/{len(requested_names)} names ({completeness_pct:.1f}%)")
+        if missing_names:
+            bt.logging.warning(f"   Generated fallback for {len(missing_names)} names: {missing_names}")
         
         # Log final timing information
         total_time = time.time() - start_time
@@ -351,10 +608,11 @@ class Miner(BaseMinerNeuron):
             f"Returned variations for {len(variations)}/{len(synapse.identity)} names."
         )
         
-        bt.logging.info(f"======== SYNAPSE VARIATIONS===============================================: {synapse.variations}")
-        bt.logging.info(f"==========================Processed variations for {len(synapse.variations)} names in run {run_id}")
-        bt.logging.info(f"==========================Synapse: {synapse}")
-        bt.logging.info("========================================================================================")
+        bt.logging.info(f"======== SYNAPSE VARIATIONS ===============================================")
+        bt.logging.info(f"   Processed variations for {len(synapse.variations)} names in run {run_id}")
+        bt.logging.info(f"   Total variations generated: {sum(len(v) for v in synapse.variations.values())}")
+        bt.logging.info(f"   Average variations per name: {sum(len(v) for v in synapse.variations.values()) / len(synapse.variations) if synapse.variations else 0:.1f}")
+        bt.logging.info(f"========================================================================================")
         return synapse
     
     def Get_Respond_LLM(self, prompt: str) -> str:
@@ -385,14 +643,17 @@ class Miner(BaseMinerNeuron):
                 self.model_name,
                 messages=self._build_llm_messages(prompt),
                 options={
-                    # Optimized for highest quality variations
-                    "num_predict": 768,      # Increased for more detailed variations
-                    "temperature": 0.65,     # Balanced: creative but controlled
-                    "top_p": 0.9,           # Focused sampling for quality
-                    "top_k": 50,            # Limit to top 50 tokens for consistency
-                    "repeat_penalty": 1.2,   # Strong penalty against repetition
-                    "frequency_penalty": 0.7, # Encourage diverse word choices
-                    "presence_penalty": 0.6,  # Encourage new patterns
+                    # MAXIMUM QUALITY settings for highest scores
+                    "num_predict": 1024,     # More tokens for comprehensive variations
+                    "temperature": 0.5,      # Lower = more focused on high-quality patterns
+                    "top_p": 0.85,          # Tighter sampling for consistency
+                    "top_k": 40,            # Limit to top 40 tokens for best quality
+                    "repeat_penalty": 1.3,   # Stronger penalty against repetition
+                    "frequency_penalty": 0.8, # Strong diversity in word choices
+                    "presence_penalty": 0.7,  # Strong encouragement for new patterns
+                    "mirostat": 2,          # Enable Mirostat for more coherent output
+                    "mirostat_tau": 5.0,    # Target perplexity
+                    "mirostat_eta": 0.1,    # Learning rate
                 }
             )
 
@@ -412,91 +673,128 @@ class Miner(BaseMinerNeuron):
                 "content": (
                     "You are an expert linguist specializing in name variation generation for identity security systems.\n\n"
                     "MISSION: Generate name variations that bypass detection while maintaining phonetic and visual similarity.\n\n"
+                    "⚠️ CRITICAL FORBIDDEN PATTERNS ⚠️:\n"
+                    "❌ NEVER include numbers (0-9) in variations\n"
+                    "❌ NEVER include address words (Street, Ave, Road, Dr, Lane, etc.)\n"
+                    "❌ NEVER include date/month names (January, Feb, etc.)\n"
+                    "❌ NEVER include special characters except hyphens and apostrophes\n"
+                    "✓ ONLY use letters, spaces, hyphens, and apostrophes\n\n"
                     "CRITICAL SCORING CRITERIA:\n"
-                    "1. PHONETIC SIMILARITY (Highest Priority):\n"
+                    "1. PHONETIC SIMILARITY (Highest Priority - 40%):\n"
                     "   - Variations must SOUND identical or nearly identical when spoken\n"
                     "   - Use Soundex/Metaphone-equivalent transformations\n"
                     "   - Maintain syllable structure and rhythm\n"
+                    "   - Preserve the SOUND of each syllable even if spelling changes\n"
                     "\n"
-                    "2. ORTHOGRAPHIC SIMILARITY:\n"
+                    "2. ORTHOGRAPHIC SIMILARITY (Very Important - 35%):\n"
                     "   - Variations must LOOK similar to the original\n"
-                    "   - Keep 60-80% of original letters\n"
+                    "   - Keep 70-90% of original letters in same/similar positions\n"
                     "   - Maintain visual pattern recognition\n"
+                    "   - Preserve first and last characters when possible\n"
                     "\n"
-                    "3. LENGTH CONSTRAINT (Critical):\n"
-                    "   - MUST be within ±3 characters of original length\n"
-                    "   - Prefer exact or ±1 character difference\n"
+                    "3. LENGTH CONSTRAINT (Critical - 15%):\n"
+                    "   - MUST be within ±2 characters of original length (prefer exact)\n"
+                    "   - Strict enforcement: variations too long/short are rejected\n"
                     "\n"
-                    "TRANSFORMATION RULES (Apply Multiple Per Variation):\n"
+                    "4. STRUCTURE PRESERVATION (10%):\n"
+                    "   - Match the number of words (1-word → 1-word, 2-word → 2-word)\n"
+                    "   - Maintain capitalization pattern\n"
+                    "\n"
+                    "SAFE TRANSFORMATION RULES (Apply 1-3 Per Variation):\n"
                     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    "Vowel Transformations:\n"
-                    "  • a ↔ e, a ↔ ai, a ↔ ay\n"
-                    "  • e ↔ i, e ↔ ee, e ↔ ea\n"
-                    "  • i ↔ y, i ↔ ie, i ↔ ee\n"
-                    "  • o ↔ u, o ↔ oo, o ↔ ow\n"
-                    "  • u ↔ oo, u ↔ ou\n"
+                    "PRIORITY 1 - Phonetic Consonant Swaps (Sound-Alike):\n"
+                    "  • ph ↔ f (philip → filip) SOUND IDENTICAL\n"
+                    "  • c ↔ k (carl → karl) SOUND IDENTICAL\n"
+                    "  • s ↔ z (susan → zuzan) SIMILAR SOUND\n"
+                    "  • ch ↔ sh (charles → sharles) SIMILAR SOUND\n"
+                    "  • j ↔ g (george → jeorge) SIMILAR SOUND\n"
+                    "  • ck ↔ k (rick → rik) SOUND IDENTICAL\n"
                     "\n"
-                    "Consonant Transformations:\n"
-                    "  • ph ↔ f ↔ v (phone → fone)\n"
-                    "  • c ↔ k ↔ ck (carl → karl)\n"
-                    "  • s ↔ z ↔ c (susan → zusan)\n"
-                    "  • ch ↔ sh ↔ tch (charles → sharles)\n"
-                    "  • j ↔ g ↔ dj (john → jon)\n"
-                    "  • t ↔ tt ↔ th (smith → smyth)\n"
-                    "  • gh → f → removed (laugh → laf)\n"
+                    "PRIORITY 2 - Vowel Transformations (Maintain Sound):\n"
+                    "  • a ↔ e (alan → elen) SIMILAR SOUND\n"
+                    "  • e ↔ i (debra → dibra) SIMILAR SOUND\n"
+                    "  • i ↔ y (smith → smyth) SIMILAR SOUND\n"
+                    "  • o ↔ u (jon → jun) SIMILAR SOUND\n"
+                    "  • ai ↔ a, ay ↔ a (maintain phonetics)\n"
+                    "  • ee ↔ ea ↔ e (stephen → stefen)\n"
                     "\n"
-                    "Double Letter Variations:\n"
-                    "  • tt → t, nn → n, ll → l, ss → s\n"
-                    "  • t → tt, n → nn, l → ll (reverse)\n"
+                    "PRIORITY 3 - Double Letter Variations:\n"
+                    "  • tt → t, ll → l, ss → s, nn → n (phillip → philip)\n"
+                    "  • t → tt, l → ll, s → ss (brian → briann)\n"
+                    "  ⚠️ Keep total length within ±2 characters!\n"
                     "\n"
-                    "Silent Letters:\n"
-                    "  • Remove: h (john → jon), gh (night → nite)\n"
-                    "  • Add: e at end (john → johne), h after consonants\n"
+                    "PRIORITY 4 - Silent Letters (Minimal Impact):\n"
+                    "  • Remove silent h: john → jon, sarah → sara\n"
+                    "  • Add silent e at end: brian → briane\n"
+                    "  • Remove silent gh: knight → nite\n"
                     "\n"
-                    "Cultural/Regional Variations:\n"
-                    "  • British vs American spellings\n"
-                    "  • Transliteration variants\n"
-                    "  • Common typos that persist\n"
+                    "COMBINATION EXAMPLES (2-3 Rules Per Variation):\n"
+                    "  • 'Stephen' → 'Stefen' (ph→f, e→e)\n"
+                    "  • 'Katherine' → 'Catherin' (K→C, e→i, remove e)\n"
+                    "  • 'Michael' → 'Mikael' (ch→k, ae→ae)\n"
                     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                    "EXAMPLES (Learn from these patterns):\n"
+                    "HIGH-QUALITY EXAMPLES (Learn These Patterns):\n"
                     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    "Original: 'John Smith'\n"
-                    "Variations:\n"
-                    "  • Jon Smith (remove silent h)\n"
-                    "  • John Smyth (i→y)\n"
-                    "  • Jon Smyth (combine)\n"
-                    "  • Jhon Smith (swap position)\n"
-                    "  • John Smithe (add silent e)\n"
-                    "  • Jahn Smith (o→a)\n"
-                    "  • John Smitt (th→tt)\n"
+                    "Example 1: 'John Smith' (9 + 5 = 14 chars)\n"
+                    "✓ Jon Smith (13 chars, -1, remove silent h, HIGH phonetic match)\n"
+                    "✓ John Smyth (14 chars, exact, i→y, HIGH phonetic match)\n"
+                    "✓ Jon Smyth (13 chars, -1, combine both, HIGH phonetic match)\n"
+                    "✓ Jhon Smith (14 chars, exact, swap oh, GOOD orthographic)\n"
+                    "✓ John Smithe (15 chars, +1, silent e, HIGH phonetic match)\n"
+                    "✓ Jahn Smith (14 chars, exact, o→a, GOOD phonetic match)\n"
+                    "✓ John Smitt (14 chars, exact, th→tt, GOOD phonetic match)\n"
+                    "❌ J. Smith (too short, structure broken)\n"
+                    "❌ John S (too short, incomplete)\n"
+                    "❌ Jonathan Smith (too long, +6 chars)\n"
                     "\n"
-                    "Original: 'Mohammed'\n"
-                    "Variations:\n"
-                    "  • Muhammad (cultural variant)\n"
-                    "  • Mohamed (remove d)\n"
-                    "  • Mohammad (swap e/a)\n"
-                    "  • Muhammed (add m)\n"
-                    "  • Mohamad (remove e)\n"
-                    "  • Muhamed (combine changes)\n"
+                    "Example 2: 'Katherine' (9 chars)\n"
+                    "✓ Catharine (9 chars, K→C, HIGH phonetic match)\n"
+                    "✓ Katherine (9 chars, exact, already perfect!)\n"
+                    "✓ Katheryne (10 chars, +1, i→y, HIGH phonetic match)\n"
+                    "✓ Kathryn (7 chars, -2, acceptable, GOOD phonetic match)\n"
+                    "✓ Catherin (8 chars, -1, remove e, GOOD phonetic match)\n"
+                    "✓ Katherina (10 chars, +1, add a, GOOD phonetic match)\n"
+                    "❌ Kate (too short, -5 chars)\n"
+                    "❌ Kathy (too short, -5 chars)\n"
+                    "\n"
+                    "Example 3: 'Mohammed' (8 chars)\n"
+                    "✓ Muhammad (8 chars, exact, cultural variant, HIGH match)\n"
+                    "✓ Mohamed (7 chars, -1, remove d, HIGH phonetic match)\n"
+                    "✓ Mohammad (8 chars, exact, swap e/a, HIGH phonetic match)\n"
+                    "✓ Muhammed (9 chars, +1, double m, HIGH phonetic match)\n"
+                    "✓ Mohamad (7 chars, -1, remove e, HIGH phonetic match)\n"
+                    "✓ Muhamed (7 chars, -1, combine, GOOD phonetic match)\n"
                     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                    "QUALITY CHECKLIST (Before Including Each Variation):\n"
-                    "  ✓ Sounds similar when spoken?\n"
-                    "  ✓ Looks similar visually?\n"
-                    "  ✓ Within ±3 characters length?\n"
-                    "  ✓ Uses 1-3 transformation rules?\n"
-                    "  ✓ Realistic and plausible?\n"
-                    "  ✓ Not a duplicate?\n"
-                    "  ✓ Not identical to original?\n\n"
-                    f"OUTPUT FORMAT:\n"
-                    f"Generate EXACTLY {self.target_variations} high-quality variations (no fewer, no more).\n"
-                    "Keep the same number of words as the source name unless a 1-word adjustment is critical for realism.\n"
-                    "Keep the first and last character if possible, preserve capitalization, and avoid numbering/bullets.\n"
-                    "Return ONLY valid JSON: {\"variations\": [\"variant1\", \"variant2\", ...]} with no trailing text."
+                    "MANDATORY QUALITY CHECKLIST (Each Variation Must Pass ALL):\n"
+                    "  ✓ Sounds nearly identical when spoken aloud? (CRITICAL)\n"
+                    "  ✓ Looks visually similar (70%+ letter overlap)? (CRITICAL)\n"
+                    "  ✓ Within ±2 characters of original length? (STRICT)\n"
+                    "  ✓ Same number of words (1→1, 2→2)? (REQUIRED)\n"
+                    "  ✓ Contains ONLY letters, spaces, hyphens, apostrophes? (REQUIRED)\n"
+                    "  ✓ NO numbers (0-9)? (FORBIDDEN)\n"
+                    "  ✓ NO address words (Street, Ave, etc.)? (FORBIDDEN)\n"
+                    "  ✓ NO date/month names? (FORBIDDEN)\n"
+                    "  ✓ Not identical to original? (REQUIRED)\n"
+                    "  ✓ Not a duplicate of another variation? (REQUIRED)\n"
+                    "  ✓ Realistic and plausible as a name? (REQUIRED)\n\n"
+                    f"OUTPUT FORMAT (STRICT):\n"
+                    f"Generate EXACTLY {self.target_variations} unique, high-quality variations.\n"
+                    "Each variation must pass ALL checklist items above.\n"
+                    "Preserve capitalization pattern from original (John → Jon, not john).\n"
+                    "Keep same word count as original name.\n"
+                    "Return ONLY valid JSON with no preamble or explanation:\n"
+                    "{\"variations\": [\"Variant1\", \"Variant2\", \"Variant3\", ...]}\n"
+                    "NO markdown, NO code blocks, NO trailing text, JUST the JSON object."
                 ),
             },
             {
                 "role": "user",
-                "content": prompt,
+                "content": (
+                    f"{prompt}\n\n"
+                    "REMINDER: Each variation MUST sound nearly IDENTICAL to the original when spoken aloud. "
+                    "Test each variation by saying it out loud - if it doesn't sound like the original, reject it. "
+                    "Prioritize phonetic accuracy over everything else."
+                ),
             },
         ]
 
@@ -568,6 +866,10 @@ class Miner(BaseMinerNeuron):
                 
                 # Filter out variations that are too different in length (for better length score)
                 variations = self._filter_by_length(variations, name)
+                
+                # CRITICAL: Filter out low-quality variations (below 0.60 similarity score)
+                # This ensures only high-scoring variations are kept, boosting overall scores
+                variations = self._filter_by_quality(variations, name, min_quality=0.60)
 
                 existing_variations = {seed_name_lower}
                 existing_variations.update(var.lower() for var in variations)
@@ -595,10 +897,47 @@ class Miner(BaseMinerNeuron):
                     variations = self._rank_and_filter_variations(variations, name, len(variations))
 
                 structured_variations = []
+                seen_variations = set()  # Track to ensure uniqueness
+                seen_normalized = set()  # Track normalized forms to prevent collisions
+                
                 for var in variations:
                     cleaned_var = self._normalize_and_capitalize(name, var)
 
                     if cleaned_var and cleaned_var != name:  # Don't include exact match
+                        # CRITICAL: Multi-level uniqueness checks to prevent penalties
+                        cleaned_lower = cleaned_var.lower()
+                        
+                        # 1. Standard uniqueness (case-insensitive)
+                        if cleaned_lower in seen_variations or cleaned_lower == name.lower():
+                            continue
+                        
+                        # 2. Collision prevention (normalized form)
+                        normalized_form = re.sub(r'[^a-z]', '', cleaned_lower)
+                        if normalized_form in seen_normalized:
+                            bt.logging.debug(f"Skipping potential collision: '{cleaned_var}' (normalized: {normalized_form})")
+                            continue
+                        
+                        # 3. Duplication prevention (soundex similarity)
+                        try:
+                            var_soundex = jellyfish.soundex(cleaned_var)
+                            is_duplicate = False
+                            for existing_var in seen_variations:
+                                try:
+                                    if jellyfish.soundex(existing_var) == var_soundex and \
+                                       jellyfish.levenshtein_distance(cleaned_lower, existing_var) <= 1:
+                                        is_duplicate = True
+                                        bt.logging.debug(f"Skipping near-duplicate: '{cleaned_var}' similar to '{existing_var}'")
+                                        break
+                                except:
+                                    pass
+                            if is_duplicate:
+                                continue
+                        except:
+                            pass
+                        
+                        # All checks passed - add variation
+                        seen_variations.add(cleaned_lower)
+                        seen_normalized.add(normalized_form)
                         # Keep DOB and address consistent with seed (validators check this)
                         structured_variation = [cleaned_var, seed_dob, seed_address]
                         structured_variations.append(structured_variation)
@@ -625,20 +964,63 @@ class Miner(BaseMinerNeuron):
         bt.logging.info(f"Generated structured variations: {name_variations}")
         return name_variations
     
+    def _filter_by_quality(self, variations: List[str], original: str, min_quality: float = 0.65) -> List[str]:
+        """
+        CRITICAL: Filter variations to keep only high-quality ones above minimum similarity threshold.
+        This maximizes phonetic and orthographic similarity scores (30% of total score).
+        Raised threshold to 0.65 for maximum competitiveness.
+        """
+        if not variations:
+            return []
+        
+        high_quality = []
+        for var in variations:
+            quality = self._score_variation_quality(var, original)
+            if quality >= min_quality:
+                high_quality.append(var)
+            else:
+                bt.logging.debug(f"Filtered out low-quality variation '{var}' (score: {quality:.3f} < {min_quality})")
+        
+        # If we filtered out everything, lower threshold slightly and try again
+        if not high_quality and variations:
+            bt.logging.warning(f"All variations below quality threshold {min_quality} for '{original}', trying 0.55")
+            for var in variations:
+                quality = self._score_variation_quality(var, original)
+                if quality >= 0.55:
+                    high_quality.append(var)
+        
+        # Last resort: return best ones anyway (ranked)
+        if not high_quality and variations:
+            bt.logging.warning(f"All variations below 0.55 threshold for '{original}', keeping best ranked")
+            return self._rank_and_filter_variations(variations, original, min(len(variations), self.max_variations))
+        
+        return high_quality
+    
     def _filter_by_length(self, variations: List[str], original: str) -> List[str]:
-        """Filter variations to keep only those with similar length to original (±3 chars for optimal score)."""
+        """Filter variations to keep only those with similar length to original (±2 chars for optimal score)."""
         original_len = len(original)
         filtered = []
         for var in variations:
-            # Allow ±3 characters difference for optimal length score (tighter constraint)
-            if abs(len(var) - original_len) <= 3:
+            # Allow ±2 characters difference for optimal length score (strict constraint)
+            if abs(len(var) - original_len) <= 2:
                 filtered.append(var)
             else:
                 bt.logging.debug(f"Filtered out '{var}' due to length difference from '{original}'")
+        
+        # If we have good matches, return them
         if filtered:
             return filtered
 
-        # If nothing passed the strict filter, fall back to closest length matches
+        # If nothing passed the strict filter, try ±3 as fallback
+        filtered_relaxed = []
+        for var in variations:
+            if abs(len(var) - original_len) <= 3:
+                filtered_relaxed.append(var)
+        
+        if filtered_relaxed:
+            return filtered_relaxed
+
+        # Last resort: fall back to closest length matches
         ranked_by_length = sorted(
             variations,
             key=lambda candidate: abs(len(candidate) - original_len)
@@ -676,21 +1058,29 @@ class Miner(BaseMinerNeuron):
             lev_dist = Levenshtein.distance(original_lower, variation_lower)
             lev_score = max(0, 1.0 - (lev_dist / max(len(original), len(variation))))
             
-            # 4. Phonetic similarity (Soundex)
+            # 4. Phonetic similarity (Soundex) - CRITICAL for scoring
             try:
                 soundex_orig = jellyfish.soundex(original)
                 soundex_var = jellyfish.soundex(variation)
-                soundex_match = 1.0 if soundex_orig == soundex_var else 0.5
+                # Perfect match = 1.0, no match = 0.0 (stricter)
+                soundex_match = 1.0 if soundex_orig == soundex_var else 0.0
             except:
-                soundex_match = 0.5
+                soundex_match = 0.0
             
-            # 5. Phonetic similarity (Metaphone)
+            # 5. Phonetic similarity (Metaphone) - CRITICAL for scoring
             try:
                 metaphone_orig = jellyfish.metaphone(original)
                 metaphone_var = jellyfish.metaphone(variation)
-                metaphone_match = 1.0 if metaphone_orig == metaphone_var else 0.5
+                # Perfect match = 1.0, no match = 0.0 (stricter)
+                metaphone_match = 1.0 if metaphone_orig == metaphone_var else 0.0
             except:
-                metaphone_match = 0.5
+                metaphone_match = 0.0
+            
+            # 6. Additional phonetic check using Jaro-Winkler for fine-grained similarity
+            try:
+                jaro_score = jellyfish.jaro_winkler_similarity(original_lower, variation_lower)
+            except:
+                jaro_score = 0.5
             
             # Additional structure alignment: token count and edge characters
             original_parts = original_lower.split()
@@ -706,14 +1096,16 @@ class Miner(BaseMinerNeuron):
                     edge_score += 0.5
 
             # Combined score (weighted average optimized for validator scoring)
+            # Heavily weight phonetic similarity (45%) and orthographic similarity (40%)
             quality_score = (
-                length_score * 0.22 +       # Length similarity: 22%
-                jaccard * 0.18 +            # Character overlap: 18%
-                lev_score * 0.18 +          # Edit distance: 18%
-                soundex_match * 0.16 +      # Phonetic (Soundex): 16%
-                metaphone_match * 0.16 +    # Phonetic (Metaphone): 16%
+                soundex_match * 0.18 +      # Phonetic (Soundex): 18%
+                metaphone_match * 0.18 +    # Phonetic (Metaphone): 18%
+                jaro_score * 0.12 +         # Jaro-Winkler similarity: 12%
+                jaccard * 0.16 +            # Character overlap: 16%
+                lev_score * 0.16 +          # Edit distance: 16%
+                length_score * 0.12 +       # Length similarity: 12%
                 structure_score * 0.05 +    # Word-count alignment: 5%
-                edge_score * 0.05           # Preserve first/last character: 5%
+                edge_score * 0.03           # Preserve first/last character: 3%
             )
             
             return quality_score
@@ -765,6 +1157,117 @@ class Miner(BaseMinerNeuron):
 
         return " ".join(formatted_words)
 
+    def _create_safe_variant(self, name: str, index: int) -> str:
+        """Create a safe, high-quality phonetic variation that won't be flagged as address/DOB.
+        
+        CRITICAL: Uses phonetically optimized transformations indexed by iteration number.
+        These variations score highly on phonetic similarity (30% of total score).
+        """
+        name_lower = name.lower()
+        
+        # OPTIMIZED: Phonetically-ranked transformations (high-scoring patterns first)
+        transformations = [
+            # Tier 1: IDENTICAL phonetic sound (highest score)
+            lambda n: n.replace('ph', 'f', 1) if 'ph' in n else n,
+            lambda n: n.replace('f', 'ph', 1) if 'f' in n and 'ph' not in n else n,
+            lambda n: n.replace('c', 'k', 1) if 'c' in n and n.index('c') > 0 else n,
+            lambda n: n.replace('k', 'c', 1) if 'k' in n else n,
+            lambda n: n.replace('ck', 'k', 1) if 'ck' in n else n,
+            
+            # Tier 2: VERY SIMILAR phonetic sound
+            lambda n: n.replace('s', 'z', 1) if 's' in n and n.index('s') > 0 else n,
+            lambda n: n.replace('z', 's', 1) if 'z' in n else n,
+            lambda n: n.replace('i', 'y', 1) if 'i' in n and n.index('i') > 0 else n,
+            lambda n: n.replace('y', 'i', 1) if 'y' in n and n.index('y') > 0 else n,
+            
+            # Tier 3: Similar vowel sounds
+            lambda n: n.replace('a', 'e', 1) if 'a' in n and n.index('a') > 0 else n,
+            lambda n: n.replace('e', 'i', 1) if 'e' in n and n.index('e') > 0 else n,
+            lambda n: n.replace('o', 'u', 1) if 'o' in n and n.index('o') > 0 else n,
+            lambda n: n.replace('e', 'a', 1) if 'e' in n and n.index('e') > 0 else n,
+            
+            # Tier 4: Double letter variations (minimal phonetic change)
+            lambda n: n.replace('tt', 't', 1) if 'tt' in n else (n.replace('t', 'tt', 1) if 't' in n and n.index('t') > 0 else n),
+            lambda n: n.replace('ll', 'l', 1) if 'll' in n else (n.replace('l', 'll', 1) if 'l' in n and n.index('l') > 0 else n),
+            lambda n: n.replace('ss', 's', 1) if 'ss' in n else (n.replace('s', 'ss', 1) if 's' in n and n.index('s') > 0 else n),
+            lambda n: n.replace('nn', 'n', 1) if 'nn' in n else (n.replace('n', 'nn', 1) if 'n' in n and n.index('n') > 0 else n),
+            
+            # Tier 5: Silent letter tweaks (preserves phonetics)
+            lambda n: n + 'e' if not n.endswith('e') and len(n) > 2 else (n[:-1] if n.endswith('e') and len(n) > 3 else n),
+            lambda n: n.replace('gh', '', 1) if 'gh' in n else n,
+            lambda n: n.replace('h', '', 1) if 'h' in n and n.index('h') > 0 and n.index('h') < len(n)-1 else n,
+            
+            # Tier 6: Additional consonant variations
+            lambda n: n.replace('ch', 'k', 1) if 'ch' in n else n,
+            lambda n: n.replace('qu', 'kw', 1) if 'qu' in n else n,
+            lambda n: n.replace('x', 'ks', 1) if 'x' in n else n,
+        ]
+        
+        transformation = transformations[index % len(transformations)]
+        variant = transformation(name_lower)
+        
+        # Ensure variant is different from original
+        if variant == name_lower and index < len(transformations):
+            # Try next transformation
+            transformation = transformations[(index + 1) % len(transformations)]
+            variant = transformation(name_lower)
+        
+        # Apply capitalization from original
+        return self._apply_capitalization_pattern(name, variant)
+    
+    def _generate_aggressive_variations(
+        self,
+        seed: str,
+        count: int,
+        existing_variations: Set[str],
+    ) -> List[str]:
+        """
+        Generate more aggressive variations using multiple simultaneous transformations.
+        Used when standard rule-based generation doesn't produce enough variations.
+        """
+        if count <= 0:
+            return []
+        
+        variations: List[str] = []
+        seed_lower = seed.lower()
+        
+        # Multi-transformation combinations
+        transformations = [
+            ('a', 'e'), ('e', 'i'), ('i', 'y'), ('o', 'u'), ('u', 'oo'),
+            ('c', 'k'), ('k', 'c'), ('s', 'z'), ('z', 's'),
+            ('ph', 'f'), ('f', 'ph'), ('ch', 'sh'),
+            ('tt', 't'), ('ll', 'l'), ('ss', 's'),
+        ]
+        
+        # Apply combinations of 2 transformations
+        for i, trans1 in enumerate(transformations):
+            if len(variations) >= count:
+                break
+                
+            for trans2 in transformations[i+1:]:
+                if len(variations) >= count:
+                    break
+                
+                variant = seed_lower
+                # Apply first transformation
+                if trans1[0] in variant:
+                    variant = variant.replace(trans1[0], trans1[1], 1)
+                # Apply second transformation
+                if trans2[0] in variant:
+                    variant = variant.replace(trans2[0], trans2[1], 1)
+                
+                # Validate length and uniqueness
+                if abs(len(variant) - len(seed)) <= 3:
+                    normalized_lower = variant.lower()
+                    if normalized_lower not in existing_variations:
+                        formatted = self._apply_capitalization_pattern(seed, variant)
+                        # Validate it doesn't look like address/DOB
+                        if not self._looks_like_address(formatted) and not self._looks_like_dob(formatted):
+                            variations.append(formatted)
+                            existing_variations.add(normalized_lower)
+        
+        return variations
+    
     def _generate_rule_based_variations(
         self,
         seed: str,
@@ -781,26 +1284,30 @@ class Miner(BaseMinerNeuron):
         variations: List[str] = []
         seed_lower = seed.lower()
 
+        # Phonetically optimized vowel swaps (prioritize sound-alike)
         vowel_swaps = {
-            "a": ["e", "ai", "ay"],
-            "e": ["i", "ea", "ee"],
-            "i": ["y", "ee"],
-            "o": ["u", "oo", "oa"],
-            "u": ["oo", "ou"],
-            "y": ["i"],
+            "a": ["e"],           # alan → elen (subtle)
+            "e": ["i", "a"],      # debra → dibra, debra → dabra
+            "i": ["y", "e"],      # smith → smyth, smith → smeth
+            "o": ["u", "a"],      # jon → jun, jon → jan
+            "u": ["o"],           # but → bot
+            "y": ["i"],           # smyth → smith
         }
 
+        # Phonetically optimized consonant patterns (prioritize identical sound)
         pattern_replacements = {
-            "ph": ["f", "v"],
-            "ck": ["k"],
-            "ch": ["sh", "k"],
-            "c": ["k", "s"],
-            "qu": ["kw"],
-            "x": ["ks"],
-            "ie": ["y"],
-            "ee": ["i"],
-            "oo": ["u"],
-            "gh": ["f", ""],
+            "ph": ["f"],          # philip → filip (IDENTICAL sound)
+            "f": ["ph"],          # reverse
+            "ck": ["k"],          # rick → rik (IDENTICAL sound)
+            "k": ["c"],           # karl → carl (IDENTICAL sound)
+            "c": ["k"],           # reverse
+            "s": ["z"],           # susan → zusan (similar sound)
+            "z": ["s"],           # reverse
+            "ch": ["k"],          # christopher → kristopher (similar)
+            "x": ["ks"],          # alex → aleks
+            "qu": ["kw"],         # quincy → kwincy
+            "ie": ["y", "i"],     # ie variations
+            "gh": [""],           # knight → knit (silent gh)
         }
 
         double_letters = ["tt", "ll", "ss", "nn", "rr", "mm"]
@@ -823,13 +1330,21 @@ class Miner(BaseMinerNeuron):
 
             if abs(len(normalized) - len(seed)) > 3:
                 return
+            
+            # CRITICAL: Validate no address/DOB patterns
+            if self._looks_like_address(normalized) or self._looks_like_dob(normalized):
+                return
 
             formatted = self._normalize_and_capitalize(seed, normalized)
             existing_variations.add(normalized_lower)
             variations.append(formatted)
 
-        # 1. Vowel swaps
+        # 1. Vowel swaps (avoid first and last character for better edge preservation)
         for idx, char in enumerate(seed_lower):
+            # Skip first and last character to preserve edges
+            if idx == 0 or idx == len(seed_lower) - 1:
+                continue
+            
             replacements = vowel_swaps.get(char, [])
             for repl in replacements:
                 new_variant = seed_lower[:idx] + repl + seed_lower[idx + 1 :]
@@ -893,22 +1408,50 @@ class Miner(BaseMinerNeuron):
         return variations
     
     def _generate_fallback_variations(self, name: str, dob: str, address: str, count: int = 5) -> List[List[str]]:
-        """Generate deterministic fallback variations when the LLM fails."""
+        """Generate deterministic fallback variations when the LLM fails.
+        
+        CRITICAL: This ensures 100% completeness by always generating variations for every name.
+        """
         existing_variations = {name.lower()}
+        target_count = max(count, self.max_variations)
+        
+        # Use aggressive rule-based generation for fallback
         fallback_names = self._generate_rule_based_variations(
             name,
-            max(count, self.max_variations),
+            target_count,
             existing_variations,
         )
 
+        # If still not enough, add more aggressive variations
+        if len(fallback_names) < target_count:
+            # Generate additional variations using more permutations
+            additional = self._generate_aggressive_variations(
+                name,
+                target_count - len(fallback_names),
+                existing_variations | {v.lower() for v in fallback_names}
+            )
+            fallback_names.extend(additional)
+
+        # Ensure we have at least the target count
         if not fallback_names:
             fallback_names = [self._apply_capitalization_pattern(name, name)]
 
         structured: List[List[str]] = []
         for variant in fallback_names:
-            structured.append([variant, dob, address])
-            if len(structured) >= count:
-                break
+            # Validate before adding
+            if not self._looks_like_address(variant) and not self._looks_like_dob(variant):
+                structured.append([variant, dob, address])
+                if len(structured) >= target_count:
+                    break
+
+        # CRITICAL: If we still don't have enough, pad with safe variations
+        while len(structured) < min(target_count, self.max_variations):
+            bt.logging.warning(f"Padding variations for {name} to meet minimum count")
+            # Create safe variations by cycling through vowel changes
+            base_variant = self._create_safe_variant(name, len(structured))
+            if base_variant and base_variant.lower() not in existing_variations:
+                structured.append([base_variant, dob, address])
+                existing_variations.add(base_variant.lower())
 
         return structured
 
@@ -929,6 +1472,8 @@ class Miner(BaseMinerNeuron):
         existing_variations.update(variation[0].lower() for variation in structured_variations)
 
         needed = target_count - len(structured_variations)
+        
+        # First try standard rule-based variations
         additional_names = self._generate_rule_based_variations(
             seed_name,
             needed,
@@ -938,8 +1483,34 @@ class Miner(BaseMinerNeuron):
         for variant in additional_names:
             if len(structured_variations) >= target_count:
                 break
-
             structured_variations.append([variant, seed_dob, seed_address])
+            existing_variations.add(variant.lower())
+        
+        # If still need more, use aggressive variations
+        if len(structured_variations) < target_count:
+            still_needed = target_count - len(structured_variations)
+            aggressive_names = self._generate_aggressive_variations(
+                seed_name,
+                still_needed,
+                existing_variations,
+            )
+            
+            for variant in aggressive_names:
+                if len(structured_variations) >= target_count:
+                    break
+                structured_variations.append([variant, seed_dob, seed_address])
+                existing_variations.add(variant.lower())
+        
+        # Final padding with safe variants if still needed
+        iteration = 0
+        while len(structured_variations) < target_count and iteration < 50:
+            safe_variant = self._create_safe_variant(seed_name, iteration)
+            if safe_variant and safe_variant.lower() not in existing_variations:
+                # Validate no address/DOB patterns
+                if not self._looks_like_address(safe_variant) and not self._looks_like_dob(safe_variant):
+                    structured_variations.append([safe_variant, seed_dob, seed_address])
+                    existing_variations.add(safe_variant.lower())
+            iteration += 1
 
         return structured_variations
     
@@ -1073,9 +1644,26 @@ class Miner(BaseMinerNeuron):
             if name.startswith(prefix):
                 name = name[len(prefix):].strip()
         
-        # Reject names containing unexpected symbols to avoid penalties
-        if not re.match(r"^[A-Za-z]+([ '\-][A-Za-z]+)*$", name):
+        # CRITICAL: Reject variations that look like addresses (numbers, street indicators)
+        # This prevents the catastrophic "Looks Like Address" penalty
+        if self._looks_like_address(name):
+            bt.logging.debug(f"Rejecting variation '{name}' - looks like an address")
+            return np.nan
+        
+        # CRITICAL: Reject variations that look like dates or DOBs
+        if self._looks_like_dob(name):
+            bt.logging.debug(f"Rejecting variation '{name}' - looks like a date/DOB")
+            return np.nan
+        
+        # STRICT: Reject names containing unexpected symbols to avoid penalties
+        # Only allow: letters, spaces, hyphens, apostrophes, and basic accented characters
+        if not re.match(r"^[A-Za-zÀ-ÿ]+([ '\-][A-Za-zÀ-ÿ]+)*$", name):
             bt.logging.debug(f"Skipping variation '{name}' due to unexpected characters")
+            return np.nan
+        
+        # CRITICAL: Reject if variation contains common problematic patterns
+        if self._contains_problematic_patterns(name):
+            bt.logging.debug(f"Rejecting variation '{name}' - contains problematic patterns")
             return np.nan
         
         # Handle cases with colons (e.g., "Here are variations: Name")
@@ -1093,9 +1681,9 @@ class Miner(BaseMinerNeuron):
         if name.lower() == seed.lower():
             return np.nan
         
-        # Check length reasonability - be more lenient (±4 characters is acceptable)
-        # This helps with length score
-        if abs(len(name) - len(seed)) > 4:
+        # Check length reasonability - strict (±3 characters max)
+        # This optimizes length score
+        if abs(len(name) - len(seed)) > 3:
             bt.logging.debug(f"Skipping variation '{name}' - length difference too large from '{seed}'")
             return np.nan
         

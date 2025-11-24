@@ -181,6 +181,13 @@ class Miner(BaseMinerNeuron):
             bt.logging.error("Start Ollama: ollama serve")
             raise RuntimeError("Ollama is required for this miner. Please install and start Ollama.")
 
+    def _normalize_name(self, value: str) -> str:
+        """Normalize names for consistent downstream comparison and caching."""
+        normalized = unicodedata.normalize("NFKD", value)
+        normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+        normalized = re.sub(r"\s+", " ", normalized.strip())
+        return normalized
+
     async def _verify_validator_request(self, synapse: IdentitySynapse) -> None:
         """
         Rejects any RPC that is not cryptographically proven to come from
@@ -481,9 +488,10 @@ class Miner(BaseMinerNeuron):
                     "  ✓ Not a duplicate?\n"
                     "  ✓ Not identical to original?\n\n"
                     f"OUTPUT FORMAT:\n"
-                    f"Generate EXACTLY {self.max_variations} high-quality variations.\n"
-                    "Return ONLY valid JSON: {\"variations\": [\"variant1\", \"variant2\", ...]}\n"
-                    "NO explanations. NO markdown. NO extra text. ONLY the JSON object."
+                    f"Generate EXACTLY {self.target_variations} high-quality variations (no fewer, no more).\n"
+                    "Keep the same number of words as the source name unless a 1-word adjustment is critical for realism.\n"
+                    "Keep the first and last character if possible, preserve capitalization, and avoid numbering/bullets.\n"
+                    "Return ONLY valid JSON: {\"variations\": [\"variant1\", \"variant2\", ...]} with no trailing text."
                 ),
             },
             {
@@ -505,6 +513,11 @@ class Miner(BaseMinerNeuron):
         self._response_cache.move_to_end(prompt)
         while len(self._response_cache) > self.cache_max_entries:
             self._response_cache.popitem(last=False)
+
+    def _normalize_and_capitalize(self, seed: str, variation: str) -> str:
+        """Normalize spacing and match capitalization to the seed."""
+        normalized = self._normalize_name(variation)
+        return self._apply_capitalization_pattern(seed, normalized)
     
     def process_variations(self, Response_list: List[str], run_id: int, run_dir: str, identity_list: List[List[str]]) -> Dict[str, List[List[str]]]:
         """
@@ -583,13 +596,8 @@ class Miner(BaseMinerNeuron):
 
                 structured_variations = []
                 for var in variations:
-                    # More aggressive cleaning but preserve name structure
-                    cleaned_var = var.strip()
-                    # Remove only problematic characters, keep hyphens and apostrophes
-                    cleaned_var = ''.join(c for c in cleaned_var if c.isalnum() or c in " '-")
-                    # Remove multiple spaces
-                    cleaned_var = ' '.join(cleaned_var.split())
-                    
+                    cleaned_var = self._normalize_and_capitalize(name, var)
+
                     if cleaned_var and cleaned_var != name:  # Don't include exact match
                         # Keep DOB and address consistent with seed (validators check this)
                         structured_variation = [cleaned_var, seed_dob, seed_address]
@@ -627,7 +635,15 @@ class Miner(BaseMinerNeuron):
                 filtered.append(var)
             else:
                 bt.logging.debug(f"Filtered out '{var}' due to length difference from '{original}'")
-        return filtered if filtered else variations[:self.max_variations]  # Keep at least some variations
+        if filtered:
+            return filtered
+
+        # If nothing passed the strict filter, fall back to closest length matches
+        ranked_by_length = sorted(
+            variations,
+            key=lambda candidate: abs(len(candidate) - original_len)
+        )
+        return ranked_by_length[: self.max_variations]
     
     def _score_variation_quality(self, variation: str, original: str) -> float:
         """
@@ -676,13 +692,28 @@ class Miner(BaseMinerNeuron):
             except:
                 metaphone_match = 0.5
             
+            # Additional structure alignment: token count and edge characters
+            original_parts = original_lower.split()
+            variation_parts = variation_lower.split()
+            part_delta = abs(len(original_parts) - len(variation_parts))
+            structure_score = 1.0 if part_delta == 0 else 0.75 if part_delta == 1 else 0.5
+
+            edge_score = 0.0
+            if variation_lower:
+                if variation_lower[0] == original_lower[:1]:
+                    edge_score += 0.5
+                if variation_lower[-1:] == original_lower[-1:]:
+                    edge_score += 0.5
+
             # Combined score (weighted average optimized for validator scoring)
             quality_score = (
-                length_score * 0.25 +      # Length similarity: 25%
-                jaccard * 0.20 +           # Character overlap: 20%
-                lev_score * 0.20 +         # Edit distance: 20%
-                soundex_match * 0.175 +    # Phonetic (Soundex): 17.5%
-                metaphone_match * 0.175    # Phonetic (Metaphone): 17.5%
+                length_score * 0.22 +       # Length similarity: 22%
+                jaccard * 0.18 +            # Character overlap: 18%
+                lev_score * 0.18 +          # Edit distance: 18%
+                soundex_match * 0.16 +      # Phonetic (Soundex): 16%
+                metaphone_match * 0.16 +    # Phonetic (Metaphone): 16%
+                structure_score * 0.05 +    # Word-count alignment: 5%
+                edge_score * 0.05           # Preserve first/last character: 5%
             )
             
             return quality_score
@@ -782,15 +813,18 @@ class Miner(BaseMinerNeuron):
         }
 
         def add_variant(candidate: str) -> None:
-            normalized = re.sub(r"\s+", " ", candidate.strip())
+            normalized = self._normalize_name(candidate)
             if not normalized:
                 return
+
             normalized_lower = normalized.lower()
             if normalized_lower in existing_variations:
                 return
+
             if abs(len(normalized) - len(seed)) > 3:
                 return
-            formatted = self._apply_capitalization_pattern(seed, normalized)
+
+            formatted = self._normalize_and_capitalize(seed, normalized)
             existing_variations.add(normalized_lower)
             variations.append(formatted)
 
@@ -851,6 +885,10 @@ class Miner(BaseMinerNeuron):
                 swapped = primary_word[-1] + primary_word[1:-1] + primary_word[0]
                 new_variant = " ".join([swapped] + words[1:])
                 add_variant(new_variant)
+
+        if len(variations) > count:
+            ranked = self._rank_and_filter_variations(variations, seed, count)
+            return ranked
 
         return variations
     
@@ -1026,9 +1064,7 @@ class Miner(BaseMinerNeuron):
         Returns:
             str: The validated and cleaned variation, or np.nan if invalid
         """
-        name = unicodedata.normalize("NFKD", name)
-        name = "".join(ch for ch in name if not unicodedata.combining(ch))
-        name = name.strip()
+        name = self._normalize_name(name)
         if not name or name.isspace():
             return np.nan
 
@@ -1037,9 +1073,6 @@ class Miner(BaseMinerNeuron):
             if name.startswith(prefix):
                 name = name[len(prefix):].strip()
         
-        # Normalize whitespace within the name
-        name = " ".join(name.split())
-
         # Reject names containing unexpected symbols to avoid penalties
         if not re.match(r"^[A-Za-z]+([ '\-][A-Za-z]+)*$", name):
             bt.logging.debug(f"Skipping variation '{name}' due to unexpected characters")

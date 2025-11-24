@@ -148,10 +148,22 @@ class Miner(BaseMinerNeuron):
 
         # Configure output limits and client reuse for better resiliency
         # MAXIMUM variations (35) for best count score - targeting 86.52%+ total score
-        self.max_variations = getattr(self.config.neuron, 'max_variations', 35)
+        config_max_variations = getattr(self.config.neuron, 'max_variations', None)
+        if not isinstance(config_max_variations, int) or config_max_variations <= 0:
+            config_max_variations = 35
+        self.max_variations = config_max_variations
+
         self.ollama_host = getattr(self.config.neuron, 'ollama_url', 'http://127.0.0.1:11434')
-        self.cache_max_entries = getattr(self.config.neuron, 'response_cache_size', 128)
-        self.target_variations = getattr(self.config.neuron, 'target_variations', self.max_variations)
+
+        cache_max_entries = getattr(self.config.neuron, 'response_cache_size', None)
+        if not isinstance(cache_max_entries, int) or cache_max_entries <= 0:
+            cache_max_entries = 128
+        self.cache_max_entries = cache_max_entries
+
+        target_variations = getattr(self.config.neuron, 'target_variations', None)
+        if not isinstance(target_variations, int) or target_variations <= 0:
+            target_variations = self.max_variations
+        self.target_variations = min(target_variations, self.max_variations)
         self._response_cache: OrderedDict[str, str] = OrderedDict()
         self.ollama_client = self._initialize_ollama_client()
         bt.logging.info(
